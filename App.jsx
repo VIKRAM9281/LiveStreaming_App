@@ -9,8 +9,9 @@ import {
   PermissionsAndroid,
   Platform,
   ScrollView,
+  ActivityIndicator,
+  TouchableOpacity,
 } from 'react-native';
-
 import {
   mediaDevices,
   RTCView,
@@ -18,22 +19,22 @@ import {
   RTCSessionDescription,
   RTCIceCandidate,
 } from 'react-native-webrtc';
-
 import io from 'socket.io-client';
 
 const socket = io('http://192.168.0.18:5000');
-
-const configuration = {
-  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-};
+const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
 export default function App() {
   const [roomId, setRoomId] = useState('');
   const [joined, setJoined] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isHostStreaming, setIsHostStreaming] = useState(false);
   const [localStream, setLocalStream] = useState(null);
   const [remoteStreams, setRemoteStreams] = useState({});
   const [isFrontCamera, setIsFrontCamera] = useState(true);
+  const [isHost, setIsHost] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
   const peersRef = useRef({});
 
@@ -43,37 +44,105 @@ export default function App() {
     socket.on('room-created', () => {
       console.log('🛠 Room created');
       setJoined(true);
+      setIsHost(true);
+      setLoading(false);
     });
 
-    socket.on('room-joined', () => {
-      console.log('👋 Room joined');
+    socket.on('room-joined', ({ isHostStreaming }) => {
+      console.log('👋 Room joined, host streaming:', isHostStreaming);
       setJoined(true);
+      setIsHost(false);
+      setIsHostStreaming(isHostStreaming);
+      setLoading(false);
     });
 
-    socket.on('room-full', () => alert('Room is full'));
+    socket.on('host-started-streaming', () => {
+      console.log('Host has started streaming');
+      setIsHostStreaming(true);
+    });
+
+    socket.on('room-full', () => {
+      setLoading(false);
+      setError('Room is full');
+    });
+
+    socket.on('invalid-room', () => {
+      setLoading(false);
+      setError('Room does not exist');
+    });
+
+    socket.on('room-exists', () => {
+      setLoading(false);
+      setError('Room already exists');
+    });
+
+    socket.on('host-left', () => {
+      alert('Host has ended the stream');
+      endStream();
+    });
+
+    socket.on('room-closed', endStream);
 
     socket.on('user-joined', handleUserJoined);
     socket.on('offer', handleReceiveOffer);
     socket.on('answer', handleAnswer);
     socket.on('ice-candidate', handleNewICECandidate);
     socket.on('user-left', handleUserLeft);
+
+    return () => {
+      socket.off('connect');
+      socket.off('room-created');
+      socket.off('room-joined');
+      socket.off('host-started-streaming');
+      socket.off('room-full');
+      socket.off('invalid-room');
+      socket.off('room-exists');
+      socket.off('host-left');
+      socket.off('room-closed');
+      socket.off('user-joined');
+      socket.off('offer');
+      socket.off('answer');
+      socket.off('ice-candidate');
+      socket.off('user-left');
+      endStream();
+    };
   }, []);
 
   const requestPermissions = async () => {
     if (Platform.OS === 'android') {
       try {
-        await PermissionsAndroid.requestMultiple([
+        const granted = await PermissionsAndroid.requestMultiple([
           PermissionsAndroid.PERMISSIONS.CAMERA,
           PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
         ]);
+        return (
+          granted['android.permission.CAMERA'] === PermissionsAndroid.RESULTS.GRANTED &&
+          granted['android.permission.RECORD_AUDIO'] === PermissionsAndroid.RESULTS.GRANTED
+        );
       } catch (err) {
         console.warn('Permission error:', err);
+        return false;
       }
     }
+    return true;
   };
 
   const createOrJoinRoom = async (type) => {
-    await requestPermissions();
+    if (!roomId.trim()) {
+      setError('Please enter a room ID');
+      return;
+    }
+
+    setError('');
+    setLoading(true);
+
+    const permissionsGranted = await requestPermissions();
+    if (!permissionsGranted) {
+      setLoading(false);
+      setError('Camera and microphone permissions are required');
+      return;
+    }
+
     if (type === 'create') {
       socket.emit('create-room', roomId);
     } else {
@@ -83,6 +152,7 @@ export default function App() {
 
   const startStream = async () => {
     try {
+      setLoading(true);
       const stream = await mediaDevices.getUserMedia({
         video: { facingMode: isFrontCamera ? 'user' : 'environment' },
         audio: true,
@@ -90,7 +160,12 @@ export default function App() {
 
       setLocalStream(stream);
       setIsStreaming(true);
+      setLoading(false);
 
+      // Notify server that host is streaming
+      socket.emit('host-streaming', roomId);
+
+      // Add tracks to existing peer connections
       Object.keys(peersRef.current).forEach(async (id) => {
         const pc = peersRef.current[id];
         stream.getTracks().forEach((track) => pc.addTrack(track, stream));
@@ -98,46 +173,66 @@ export default function App() {
         await pc.setLocalDescription(offer);
         socket.emit('offer', { target: id, sdp: pc.localDescription });
       });
-      setRoomId('');
     } catch (error) {
       console.error('❌ Error getting stream:', error);
+      setLoading(false);
+      setError('Failed to start stream');
     }
   };
 
   const switchCamera = async () => {
-    setIsFrontCamera((prev) => !prev);
+    try {
+      setLoading(true);
+      setIsFrontCamera((prev) => !prev);
 
-    if (localStream) {
-      localStream.getTracks().forEach((track) => track.stop());
-    }
+      if (localStream) {
+        localStream.getTracks().forEach((track) => track.stop());
+      }
 
-    const newStream = await mediaDevices.getUserMedia({
-      video: { facingMode: !isFrontCamera ? 'user' : 'environment' },
-      audio: true,
-    });
-
-    setLocalStream(newStream);
-
-    Object.values(peersRef.current).forEach((pc) => {
-      pc.getSenders().forEach((sender) => {
-        const kind = sender.track?.kind;
-        const newTrack = newStream.getTracks().find((t) => t.kind === kind);
-        if (newTrack) {
-          sender.replaceTrack(newTrack);
-        }
+      const newStream = await mediaDevices.getUserMedia({
+        video: { facingMode: !isFrontCamera ? 'user' : 'environment' },
+        audio: true,
       });
-    });
+
+      setLocalStream(newStream);
+      setLoading(false);
+
+      Object.values(peersRef.current).forEach((pc) => {
+        pc.getSenders().forEach((sender) => {
+          const kind = sender.track?.kind;
+          const newTrack = newStream.getTracks().find((t) => t.kind === kind);
+          if (newTrack) {
+            sender.replaceTrack(newTrack);
+          }
+        });
+      });
+    } catch (error) {
+      console.error('Error switching camera:', error);
+      setLoading(false);
+      setError('Failed to switch camera');
+    }
   };
 
   const endStream = () => {
-    if (localStream) {
-      localStream.getTracks().forEach((track) => track.stop());
-      setLocalStream(null);
+    try {
+      if (localStream) {
+        localStream.getTracks().forEach((track) => track.stop());
+        setLocalStream(null);
+      }
+
+      Object.values(peersRef.current).forEach(pc => pc.close());
+
+      setIsStreaming(false);
+      setIsHostStreaming(false);
+      setJoined(false);
+      setIsHost(false);
+      setRemoteStreams({});
+      peersRef.current = {};
+
+      socket.emit('leave-room', roomId);
+    } catch (error) {
+      console.error('Error ending stream:', error);
     }
-    setIsStreaming(false);
-    setJoined(false);
-    setRemoteStreams({});
-    peersRef.current = {};
   };
 
   const createPeerConnection = (id) => {
@@ -159,38 +254,49 @@ export default function App() {
       }));
     };
 
+    pc.onconnectionstatechange = () => {
+      console.log(`Connection state with ${id}: ${pc.connectionState}`);
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        handleUserLeft(id);
+      }
+    };
+
     peersRef.current[id] = pc;
     return pc;
   };
 
   const handleUserJoined = async (id) => {
-    const pc = createPeerConnection(id);
-    if (localStream) {
-      localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+    if (isHost) {
+      const pc = createPeerConnection(id);
+      if (localStream) {
+        localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+      }
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit('offer', { target: id, sdp: pc.localDescription });
     }
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    socket.emit('offer', { target: id, sdp: pc.localDescription });
   };
 
-  const handleReceiveOffer = async ({ sdp, target }) => {
-    const pc = createPeerConnection(target);
+  const handleReceiveOffer = async ({ sdp, sender }) => {
+    const pc = createPeerConnection(sender);
     await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+
     if (localStream) {
       localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
     }
+
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    socket.emit('answer', { target, sdp: pc.localDescription });
+    socket.emit('answer', { target: sender, sdp: pc.localDescription });
   };
 
-  const handleAnswer = async ({ sdp, target }) => {
-    const pc = peersRef.current[target];
+  const handleAnswer = async ({ sdp, sender }) => {
+    const pc = peersRef.current[sender];
     if (pc) await pc.setRemoteDescription(new RTCSessionDescription(sdp));
   };
 
-  const handleNewICECandidate = async ({ candidate, target }) => {
-    const pc = peersRef.current[target];
+  const handleNewICECandidate = async ({ candidate, sender }) => {
+    const pc = peersRef.current[sender];
     if (pc) await pc.addIceCandidate(new RTCIceCandidate(candidate));
   };
 
@@ -206,84 +312,182 @@ export default function App() {
     });
   };
 
+  const renderJoinScreen = () => (
+    <>
+      <TextInput
+        style={styles.input}
+        placeholder="Enter Room ID"
+        value={roomId}
+        onChangeText={(text) => {
+          setRoomId(text);
+          setError('');
+        }}
+        placeholderTextColor="#999"
+      />
+      {error ? <Text style={styles.errorText}>{error}</Text> : null}
+      <View style={styles.buttonRow}>
+        <TouchableOpacity
+          style={[styles.button, styles.createButton]}
+          onPress={() => createOrJoinRoom('create')}
+          disabled={loading}
+        >
+          {loading && isHost ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.buttonText}>Create Room</Text>
+          )}
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.button, styles.joinButton]}
+          onPress={() => createOrJoinRoom('join')}
+          disabled={loading}
+        >
+          {loading && !isHost ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.buttonText}>Join Room</Text>
+          )}
+        </TouchableOpacity>
+      </View>
+    </>
+  );
+
+  const renderHostControls = () => (
+    <>
+      <Button
+        title="Start Streaming"
+        onPress={startStream}
+        disabled={loading || isStreaming}
+      />
+      {loading && <ActivityIndicator style={styles.loadingIndicator} />}
+    </>
+  );
+
+  const renderViewerScreen = () => (
+    <View style={styles.viewerContainer}>
+      {isHostStreaming ? (
+        Object.entries(remoteStreams).length > 0 ? (
+          <>
+            <RTCView
+              streamURL={Object.values(remoteStreams)[0].toURL()}
+              style={styles.fullScreenVideo}
+              objectFit="cover"
+            />
+            <View style={styles.bottomOverlay}>
+              <Text style={styles.userCountText}>
+                👥 {Object.keys(peersRef.current).length} viewer(s)
+              </Text>
+              <Button title="Leave Room" color="red" onPress={endStream} />
+            </View>
+          </>
+        ) : (
+          <View style={styles.waitingContainer}>
+            <ActivityIndicator size="large" />
+            <Text style={styles.waitingText}>Connecting to host stream...</Text>
+            <Button title="Leave Room" color="red" onPress={endStream} />
+          </View>
+        )
+      ) : (
+        <View style={styles.waitingContainer}>
+          <ActivityIndicator size="large" />
+          <Text style={styles.waitingText}>Waiting for host to start streaming...</Text>
+          <Button title="Leave Room" color="red" onPress={endStream} />
+        </View>
+      )}
+    </View>
+  );
+
+  const renderStreamingScreen = () => (
+    <>
+      <RTCView
+        streamURL={localStream.toURL()}
+        style={styles.fullScreenVideo}
+        objectFit="cover"
+        mirror={isFrontCamera}
+      />
+      <View style={styles.bottomOverlay}>
+        <Text style={styles.userCountText}>
+          👥 {Object.keys(peersRef.current).length} viewer(s)
+        </Text>
+        <Button title="Switch Camera" onPress={switchCamera} disabled={loading} />
+        <View style={{ height: 10 }} />
+        <Button title="End Streaming" color="red" onPress={endStream} />
+      </View>
+
+      {Object.entries(remoteStreams).length > 0 && (
+        <ScrollView horizontal style={styles.remoteContainer}>
+          {Object.entries(remoteStreams).map(([id, stream]) => (
+            <RTCView
+              key={id}
+              streamURL={stream.toURL()}
+              style={styles.remoteVideo}
+              objectFit="cover"
+            />
+          ))}
+        </ScrollView>
+      )}
+    </>
+  );
+
   return (
     <SafeAreaView style={styles.container}>
       <Text style={styles.title}>🎥 React Native Live Stream</Text>
 
-      {!isStreaming && (
-        <>
-          <TextInput
-            style={styles.input}
-            placeholder="Enter Room ID"
-            value={roomId}
-            onChangeText={setRoomId}
-          />
-          <View style={styles.buttonRow}>
-            <Button title="Create Room" onPress={() => createOrJoinRoom('create')} />
-            <Button title="Join Room" onPress={() => createOrJoinRoom('join')} />
-          </View>
-        </>
-      )}
-
-      {joined && !isStreaming && (
-        <Button title="Start Streaming" onPress={startStream} />
-      )}
-
-      {localStream && isStreaming && (
-        <>
-          <RTCView
-            streamURL={localStream.toURL()}
-            style={styles.fullScreenVideo}
-            objectFit="cover"
-            mirror={isFrontCamera}
-          />
-          <View style={styles.bottomOverlay}>
-            <Text style={styles.userCountText}>
-              👥 {Object.keys(peersRef.current).length} viewer(s)
-            </Text>
-            <Button title="Switch Camera" onPress={switchCamera} />
-            <View style={{ height: 10 }} />
-            <Button title="End Streaming" color="red" onPress={endStream} />
-          </View>
-
-          <ScrollView horizontal style={styles.remoteContainer}>
-            {Object.entries(remoteStreams).map(([id, stream]) => (
-              <RTCView
-                key={id}
-                streamURL={stream.toURL()}
-                style={styles.remoteVideo}
-                objectFit="cover"
-              />
-            ))}
-          </ScrollView>
-        </>
-      )}
+      {!joined && renderJoinScreen()}
+      {joined && !isStreaming && isHost && renderHostControls()}
+      {joined && !isHost && renderViewerScreen()}
+      {isStreaming && renderStreamingScreen()}
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000' },
+  container: {
+    flex: 1,
+    backgroundColor: '#000',
+    paddingHorizontal: 15,
+  },
   title: {
     fontSize: 22,
     fontWeight: 'bold',
-    marginTop: 10,
+    marginVertical: 15,
     color: '#fff',
     textAlign: 'center',
   },
   input: {
-    borderColor: '#ccc',
+    borderColor: '#444',
     borderWidth: 1,
-    backgroundColor: '#fff',
-    margin: 15,
-    paddingHorizontal: 10,
-    height: 40,
-    borderRadius: 5,
+    backgroundColor: '#222',
+    marginVertical: 15,
+    paddingHorizontal: 15,
+    height: 50,
+    borderRadius: 8,
+    color: '#fff',
+    fontSize: 16,
   },
   buttonRow: {
     flexDirection: 'row',
-    justifyContent: 'space-evenly',
+    justifyContent: 'space-between',
     marginBottom: 15,
+  },
+  button: {
+    flex: 1,
+    padding: 15,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginHorizontal: 5,
+  },
+  createButton: {
+    backgroundColor: '#4CAF50',
+  },
+  joinButton: {
+    backgroundColor: '#2196F3',
+  },
+  buttonText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 16,
   },
   fullScreenVideo: {
     flex: 1,
@@ -295,21 +499,51 @@ const styles = StyleSheet.create({
     bottom: 20,
     width: '100%',
     alignItems: 'center',
+    paddingHorizontal: 20,
   },
   userCountText: {
     color: '#fff',
     fontSize: 16,
     marginBottom: 10,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    padding: 8,
+    borderRadius: 20,
   },
   remoteContainer: {
     position: 'absolute',
     bottom: 100,
+    left: 0,
+    right: 0,
     paddingHorizontal: 10,
-    flexDirection: 'row',
   },
   remoteVideo: {
     width: 100,
     height: 150,
     margin: 5,
+    borderRadius: 8,
+  },
+  errorText: {
+    color: '#ff4444',
+    textAlign: 'center',
+    marginBottom: 15,
+  },
+  loadingIndicator: {
+    marginVertical: 15,
+  },
+  viewerContainer: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  waitingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  waitingText: {
+    color: '#fff',
+    fontSize: 16,
+    marginVertical: 20,
+    textAlign: 'center',
   },
 });
