@@ -77,8 +77,8 @@ export default function App() {
     });
 
     socket.on('host-left', () => {
-      alert('Host has ended the stream');
-      endStream();
+      console.log("🛑 Host ended the stream");
+      setIsHostStreaming(false);
     });
 
     socket.on('room-closed', endStream);
@@ -255,7 +255,6 @@ export default function App() {
     };
 
     pc.onconnectionstatechange = () => {
-      console.log(`Connection state with ${id}: ${pc.connectionState}`);
       if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
         handleUserLeft(id);
       }
@@ -353,54 +352,45 @@ export default function App() {
   );
 
   const renderHostControls = () => (
-    <>
+    <View>
       <Button
         title="Start Streaming"
         onPress={startStream}
         disabled={loading || isStreaming}
       />
       {loading && <ActivityIndicator style={styles.loadingIndicator} />}
-    </>
+    </View>
   );
 
   const renderViewerScreen = () => (
     <View style={styles.viewerContainer}>
       {isHostStreaming ? (
         Object.entries(remoteStreams).length > 0 ? (
-          <>
-            <RTCView
-              streamURL={Object.values(remoteStreams)[0].toURL()}
-              style={styles.fullScreenVideo}
-              objectFit="cover"
-            />
-            <View style={styles.bottomOverlay}>
-              <Text style={styles.userCountText}>
-                👥 {Object.keys(peersRef.current).length} viewer(s)
-              </Text>
-              <Button title="Leave Room" color="red" onPress={endStream} />
-            </View>
-          </>
+          <RTCView
+            streamURL={Object.values(remoteStreams)[0].toURL()}
+            style={styles.fullScreenVideo}
+            objectFit="cover"
+          />
         ) : (
           <View style={styles.waitingContainer}>
             <ActivityIndicator size="large" />
             <Text style={styles.waitingText}>Connecting to host stream...</Text>
-            <Button title="Leave Room" color="red" onPress={endStream} />
           </View>
         )
       ) : (
         <View style={styles.waitingContainer}>
           <ActivityIndicator size="large" />
           <Text style={styles.waitingText}>Waiting for host to start streaming...</Text>
-          <Button title="Leave Room" color="red" onPress={endStream} />
         </View>
       )}
+      <Button title="Leave Room" color="red" onPress={endStream} />
     </View>
   );
 
   const renderStreamingScreen = () => (
     <>
       <RTCView
-        streamURL={localStream.toURL()}
+        streamURL={localStream?.toURL()}
         style={styles.fullScreenVideo}
         objectFit="cover"
         mirror={isFrontCamera}
@@ -413,26 +403,12 @@ export default function App() {
         <View style={{ height: 10 }} />
         <Button title="End Streaming" color="red" onPress={endStream} />
       </View>
-
-      {Object.entries(remoteStreams).length > 0 && (
-        <ScrollView horizontal style={styles.remoteContainer}>
-          {Object.entries(remoteStreams).map(([id, stream]) => (
-            <RTCView
-              key={id}
-              streamURL={stream.toURL()}
-              style={styles.remoteVideo}
-              objectFit="cover"
-            />
-          ))}
-        </ScrollView>
-      )}
     </>
   );
 
   return (
     <SafeAreaView style={styles.container}>
-      <Text style={styles.title}>🎥 React Native Live Stream</Text>
-
+      <Text style={styles.title}>🎥 Live Stream App</Text>
       {!joined && renderJoinScreen()}
       {joined && !isStreaming && isHost && renderHostControls()}
       {joined && !isHost && renderViewerScreen()}
