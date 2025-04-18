@@ -8,7 +8,6 @@ import {
   StyleSheet,
   PermissionsAndroid,
   Platform,
-  ScrollView,
   ActivityIndicator,
   TouchableOpacity,
 } from 'react-native';
@@ -57,7 +56,7 @@ export default function App() {
     });
 
     socket.on('host-started-streaming', () => {
-      console.log('Host has started streaming');
+      console.log('📺 Host has started streaming');
       setIsHostStreaming(true);
     });
 
@@ -77,13 +76,30 @@ export default function App() {
     });
 
     socket.on('host-left', () => {
-      console.log("🛑 Host ended the stream");
+      console.log('🛑 Host ended the stream');
       setIsHostStreaming(false);
     });
 
     socket.on('room-closed', endStream);
 
     socket.on('user-joined', handleUserJoined);
+
+socket.on('viewer-joined', (hostId) => {
+  console.log(`👀 Viewer joined, preparing to connect to host ${hostId}`);
+  const pc = createPeerConnection(hostId);
+  if (localStream) {
+    localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+  }
+  pc.createOffer()
+    .then((offer) => pc.setLocalDescription(offer))
+    .then(() => {
+      socket.emit('offer', { target: hostId, sdp: pc.localDescription });
+    })
+    .catch((err) => {
+      console.error('❌ Error during offer creation:', err);
+    });
+});
+
     socket.on('offer', handleReceiveOffer);
     socket.on('answer', handleAnswer);
     socket.on('ice-candidate', handleNewICECandidate);
@@ -100,6 +116,7 @@ export default function App() {
       socket.off('host-left');
       socket.off('room-closed');
       socket.off('user-joined');
+      socket.off('viewer-joined');
       socket.off('offer');
       socket.off('answer');
       socket.off('ice-candidate');
@@ -162,10 +179,8 @@ export default function App() {
       setIsStreaming(true);
       setLoading(false);
 
-      // Notify server that host is streaming
       socket.emit('host-streaming', roomId);
 
-      // Add tracks to existing peer connections
       Object.keys(peersRef.current).forEach(async (id) => {
         const pc = peersRef.current[id];
         stream.getTracks().forEach((track) => pc.addTrack(track, stream));
@@ -220,7 +235,7 @@ export default function App() {
         setLocalStream(null);
       }
 
-      Object.values(peersRef.current).forEach(pc => pc.close());
+      Object.values(peersRef.current).forEach((pc) => pc.close());
 
       setIsStreaming(false);
       setIsHostStreaming(false);
@@ -236,10 +251,23 @@ export default function App() {
   };
 
   const createPeerConnection = (id) => {
-    const pc = new RTCPeerConnection(configuration);
-
+    console.log(`🔗 Creating peer connection for ${id}`);
+    const randomStr = Math.random().toString(36).substring(2, 6);
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        {
+          urls: 'turn:192.168.0.24:3478',
+          username: "vikram",
+          credential: 'vikram'
+        }
+      ]
+    })
+    pc.oniceconnectionstatechange = () => {
+      console.log('ICE State:', pc.iceConnectionState);
+    };
     pc.onicecandidate = (event) => {
       if (event.candidate) {
+        console.log(`📡 Sending ICE candidate to ${id}`);
         socket.emit('ice-candidate', {
           target: id,
           candidate: event.candidate,
@@ -248,6 +276,7 @@ export default function App() {
     };
 
     pc.ontrack = (event) => {
+      console.log(`📺 Received track from ${id}`);
       setRemoteStreams((prev) => ({
         ...prev,
         [id]: event.streams[0],
@@ -255,6 +284,7 @@ export default function App() {
     };
 
     pc.onconnectionstatechange = () => {
+      console.log(`🔌 Connection state for ${id}: ${pc.connectionState}`);
       if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
         handleUserLeft(id);
       }
@@ -266,6 +296,7 @@ export default function App() {
 
   const handleUserJoined = async (id) => {
     if (isHost) {
+      console.log(`👋 Viewer ${id} joined, creating offer`);
       const pc = createPeerConnection(id);
       if (localStream) {
         localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
@@ -277,29 +308,48 @@ export default function App() {
   };
 
   const handleReceiveOffer = async ({ sdp, sender }) => {
-    const pc = createPeerConnection(sender);
-    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-
-    if (localStream) {
-      localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+    console.log(`📩 Received offer from ${sender}`);
+    let pc = peersRef.current[sender];
+    if (!pc) {
+      pc = createPeerConnection(sender);
     }
-
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    socket.emit('answer', { target: sender, sdp: pc.localDescription });
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      console.log(`📤 Sending answer to ${sender}`);
+      socket.emit('answer', { target: sender, sdp: pc.localDescription });
+    } catch (error) {
+      console.error('❌ Error handling offer:', error);
+    }
   };
 
   const handleAnswer = async ({ sdp, sender }) => {
+    console.log(`📩 Received answer from ${sender}`);
     const pc = peersRef.current[sender];
-    if (pc) await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    if (pc) {
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      } catch (error) {
+        console.error('❌ Error handling answer:', error);
+      }
+    }
   };
 
   const handleNewICECandidate = async ({ candidate, sender }) => {
+    console.log(`📡 Received ICE candidate from ${sender}`);
     const pc = peersRef.current[sender];
-    if (pc) await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    if (pc) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (error) {
+        console.error('❌ Error handling ICE candidate:', error);
+      }
+    }
   };
 
   const handleUserLeft = (id) => {
+    console.log(`🚪 User ${id} left`);
     if (peersRef.current[id]) {
       peersRef.current[id].close();
       delete peersRef.current[id];
@@ -484,19 +534,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.5)',
     padding: 8,
     borderRadius: 20,
-  },
-  remoteContainer: {
-    position: 'absolute',
-    bottom: 100,
-    left: 0,
-    right: 0,
-    paddingHorizontal: 10,
-  },
-  remoteVideo: {
-    width: 100,
-    height: 150,
-    margin: 5,
-    borderRadius: 8,
   },
   errorText: {
     color: '#ff4444',
