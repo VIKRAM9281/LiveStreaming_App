@@ -20,9 +20,8 @@ import {
 } from 'react-native-webrtc';
 import io from 'socket.io-client';
 
-const socket = io('http://192.168.0.18:5000');
-const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
-
+const socket = io('https://streamingbackend-eh65.onrender.com');
+// const socket = io('https://streamalong.live');
 export default function App() {
   const [roomId, setRoomId] = useState('');
   const [joined, setJoined] = useState(false);
@@ -36,7 +35,28 @@ export default function App() {
   const [error, setError] = useState('');
   const [SocketIs,setSocketIs]=useState(socket.connected)
   const peersRef = useRef({});
+   const [peerConnection, setPeerConnection] = useState(null);
+useEffect(() => {
+    const setupConnection = async () => {
+      try {
+        const response = await fetch('https://saluslivestream.metered.live/api/v1/turn/credentials?apiKey=55b40b68db82fa6d95da9a535f2371abbee1');
 
+        if (!response.ok) {
+          throw new Error('Failed to fetch ICE servers');
+        }
+        const data = await response.json();
+        const pcConfig = {
+          iceServers: data
+        };
+        setPeerConnection(pcConfig); // <-- Create a new state variable
+        console.log('RTCPeerConnection initialized with:', data);
+      } catch (error) {
+        console.error('Error setting up peer connection:', error);
+      }
+    };
+
+    setupConnection();
+  }, []);
   useEffect(() => {
        const handleConnect = () => setSocketIs(true);
         const handleDisconnect = () => setSocketIs(false);
@@ -262,27 +282,25 @@ socket.on('viewer-joined', (hostId) => {
   const createPeerConnection = (id) => {
     console.log(`🔗 Creating peer connection for ${id}`);
     const randomStr = Math.random().toString(36).substring(2, 6);
-    const pc = new RTCPeerConnection({
-      iceServers: [
-        {
-          urls: 'turn:38.242.235.250:5349',
-          username: "vikram",
-          credential: 'vikram'
-        }
-      ]
-    })
+   const pc = new RTCPeerConnection(peerConnection);
     pc.oniceconnectionstatechange = () => {
       console.log('ICE State:', pc.iceConnectionState);
     };
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        console.log(`📡 Sending ICE candidate to ${id}`);
-        socket.emit('ice-candidate', {
-          target: id,
-          candidate: event.candidate,
-        });
-      }
-    };
+pc.onicegatheringstatechange = () => {
+  console.log("🧊 ICE gathering state:", pc.iceGatheringState);
+};
+pc.onicecandidate = (event) => {
+  if (event.candidate) {
+    console.log(`📡 Sending ICE candidate to ${id}:`, event.candidate);
+    socket.emit('ice-candidate', {
+      target: id,
+      candidate: event.candidate,
+    });
+  } else {
+    console.log('🚫 ICE candidate is null (gathering complete)');
+  }
+};
+
 
     pc.ontrack = (event) => {
       console.log(`📺 Received track from ${id}`);
