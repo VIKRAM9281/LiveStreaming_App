@@ -34,12 +34,21 @@ export default function App() {
   const [isHost, setIsHost] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-
+  const [SocketIs,setSocketIs]=useState(socket.connected)
   const peersRef = useRef({});
 
   useEffect(() => {
-    socket.on('connect', () => console.log('✅ Connected to socket.io:', socket.id));
-
+       const handleConnect = () => setSocketIs(true);
+        const handleDisconnect = () => setSocketIs(false);
+    socket.on('connect', handleConnect);
+    socket.on('disconnect', handleDisconnect);
+if (socket.connected) {
+    setSocketIs(true)
+  console.log('🔵 Socket is currently connected');
+} else {
+    setSocketIs(false)
+  console.log('🔴 Socket is currently disconnected');
+}
     socket.on('room-created', () => {
       console.log('🛠 Room created');
       setJoined(true);
@@ -123,7 +132,7 @@ socket.on('viewer-joined', (hostId) => {
       socket.off('user-left');
       endStream();
     };
-  }, []);
+  }, [SocketIs]);
 
   const requestPermissions = async () => {
     if (Platform.OS === 'android') {
@@ -256,7 +265,7 @@ socket.on('viewer-joined', (hostId) => {
     const pc = new RTCPeerConnection({
       iceServers: [
         {
-          urls: 'turn:192.168.0.24:3478',
+          urls: 'turn:38.242.235.250:5349',
           username: "vikram",
           credential: 'vikram'
         }
@@ -362,6 +371,7 @@ socket.on('viewer-joined', (hostId) => {
   };
 
   const renderJoinScreen = () => (
+  SocketIs  ? (
     <>
       <TextInput
         style={styles.input}
@@ -399,6 +409,13 @@ socket.on('viewer-joined', (hostId) => {
         </TouchableOpacity>
       </View>
     </>
+  ) : (
+    <View>
+      <Text style={[styles.input, { color: 'red', textAlign: 'center' }]}>
+        🚫 Socket is disconnected. Please check your Socket connection And Internet connection.
+      </Text>
+    </View>
+  )
   );
 
   const renderHostControls = () => (
