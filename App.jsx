@@ -21,6 +21,9 @@ import {
 import io from 'socket.io-client';
 
 const socket = io('https://streamingbackend-eh65.onrender.com');
+const configuration = {
+  iceServers: [{urls: 'stun:stun.relay.metered.ca:80'}]
+};
 // const socket = io('https://streamalong.live');
 export default function App() {
   const [roomId, setRoomId] = useState('');
@@ -282,7 +285,7 @@ socket.on('viewer-joined', (hostId) => {
   const createPeerConnection = (id) => {
     console.log(`🔗 Creating peer connection for ${id}`);
     const randomStr = Math.random().toString(36).substring(2, 6);
-   const pc = new RTCPeerConnection(peerConnection);
+   const pc = new RTCPeerConnection(configuration);
     pc.oniceconnectionstatechange = () => {
       console.log('ICE State:', pc.iceConnectionState);
     };
