@@ -65,6 +65,10 @@ useEffect(() => {
         const handleDisconnect = () => setSocketIs(false);
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
+    socket.on('offer', handleReceiveOffer);
+    socket.on('answer', handleAnswer);
+    socket.on('ice-candidate', handleNewICECandidate);
+    socket.on('user-left', handleUserLeft);
 if (socket.connected) {
     setSocketIs(true)
   console.log('🔵 Socket is currently connected');
@@ -132,10 +136,6 @@ socket.on('viewer-joined', (hostId) => {
     });
 });
 
-    socket.on('offer', handleReceiveOffer);
-    socket.on('answer', handleAnswer);
-    socket.on('ice-candidate', handleNewICECandidate);
-    socket.on('user-left', handleUserLeft);
 
     return () => {
       socket.off('connect');
@@ -282,10 +282,15 @@ socket.on('viewer-joined', (hostId) => {
     }
   };
 
-  const createPeerConnection = (id) => {
+  const createPeerConnection =async  (id) => {
     console.log(`🔗 Creating peer connection for ${id}`);
     const randomStr = Math.random().toString(36).substring(2, 6);
    const pc = new RTCPeerConnection(configuration);
+
+     const stream = await mediaDevices.getUserMedia({ video: true, audio: true });
+
+     stream.getTracks().forEach((track) => pc.addTrack(track, stream)); // ✅ REQUIRED
+
     pc.oniceconnectionstatechange = () => {
       console.log('ICE State:', pc.iceConnectionState);
     };
