@@ -82,6 +82,7 @@ useEffect(() => {
     });
 
     socket.on('room-joined', ({ isHostStreaming }) => {
+        console.log(`room joined`)
       setJoined(true);
       setIsHost(false);
       setIsHostStreaming(isHostStreaming);
@@ -168,7 +169,8 @@ const startStream = async () => {
     for (const id of Object.keys(peersRef.current)) {
       const pc = peersRef.current[id];
       if (!pc) continue;
-
+    console.log(stream)
+    console.log(stream.getTracks())
       stream.getTracks().forEach((track) => pc.addTrack(track, stream));
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
@@ -184,69 +186,64 @@ const startStream = async () => {
 
 
 const createPeerConnection = async (id) => {
-  try {
-    const pc = new RTCPeerConnection(iceConfig);
-    console.log('Creating PC for', id);
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        socket.emit('ice-candidate', { target: id, candidate: event.candidate });
-      }
-    };
-
-    pc.ontrack = (event) => {
-      console.log('Received remote track from', id);
-      setRemoteStreams((prev) => ({
-        ...prev,
-        [id]: event.streams[0],
-      }));
-    };
-
-    pc.onconnectionstatechange = () => {
-      if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
-        handleUserLeft(id);
-      }
-    };
-
-    peersRef.current[id] = pc;
-    return pc;
-  } catch (err) {
-    console.error('Error creating peer connection:', err);
-    return null;
+  if (peersRef.current[id]) {
+    return peersRef.current[id];
   }
+
+  const pc = new RTCPeerConnection(iceConfig);
+console.log(pc.onicecandidate)
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      socket.emit('ice-candidate', { target: id, candidate: event.candidate });
+    }
+  };
+
+  pc.ontrack = (event) => {
+    setRemoteStreams((prev) => ({
+      ...prev,
+      [id]: event.streams[0],
+    }));
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
+      handleUserLeft(id);
+    }
+  };
+
+  peersRef.current[id] = pc;
+console.log(pc)
+console.log(peersRef.current[id])
+
+  return pc;
 };
+
 
 
 const handleUserJoined = async (id) => {
   if (!isHost) return;
 
   try {
+      console.log(localStream)
     if (!localStream) {
       console.warn('Local stream not ready, delaying offer creation...');
-      // Retry after delay if stream is not ready
       setTimeout(() => handleUserJoined(id), 1000);
       return;
     }
 
     const pc = await createPeerConnection(id);
-
-    localStream.getTracks().forEach((track) => {
-      pc.addTrack(track, localStream);
-    });
+    localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-
-    socket.emit('offer', {
-      target: id,
-      sdp: pc.localDescription,
-    });
-
-    console.log(`📤 Sent offer from host to ${id}`);
+console.log(offer)
+console.log(pc.localDescription)
+    socket.emit('offer', { target: id, sdp: pc.localDescription });
   } catch (error) {
-    console.error('❌ Error in handleUserJoined:', error);
+    console.error('Error in handleUserJoined:', error);
   }
 };
+
 
 
 
@@ -260,6 +257,8 @@ const handleViewerJoined = async (hostId) => {
   // Don't getUserMedia here — viewer doesn't need to send video/audio
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
+  console.log(offer)
+  console.log(pc.localDescription)
   socket.emit('offer', { target: hostId, sdp: pc.localDescription });
 };
 
@@ -267,10 +266,11 @@ const handleViewerJoined = async (hostId) => {
 const handleReceiveOffer = async ({ sdp, sender }) => {
   const pc = await createPeerConnection(sender);
   if (!pc) return;
-
+console.log(sdp)
   await pc.setRemoteDescription(new RTCSessionDescription(sdp));
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
+  console.log(pc.localDescription)
   socket.emit('answer', { target: sender, sdp: pc.localDescription });
 };
 
@@ -362,10 +362,11 @@ const handleReceiveOffer = async ({ sdp, sender }) => {
       </Text>
     )
   );
-
+console.log(remoteStreams)
+console.log(localStream)
   const renderStreamingScreen = () => (
     <>
-      {localStream && (
+      {localStream && typeof localStream.toURL === 'function' && (
         <RTCView
           streamURL={localStream.toURL()}
           style={styles.fullScreenVideo}
