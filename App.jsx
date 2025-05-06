@@ -19,6 +19,7 @@ import {
   RTCIceCandidate,
 } from 'react-native-webrtc';
 import io from 'socket.io-client';
+import { Platform as RNPlatform } from 'react-native';
 
 const socket = io('https://streamingbackend-eh65.onrender.com', {
   reconnection: true,
@@ -38,34 +39,45 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [socketIsConnected, setSocketIsConnected] = useState(socket.connected);
+  const [deviceInfo, setDeviceInfo] = useState('');
 
   const peersRef = useRef({});
   const pendingViewersRef = useRef([]);
   const streamStateRef = useRef({ localStream: null, isStreaming: false });
+  const isHostRef = useRef(false);
+  const iceCandidateBuffer = useRef({});
   const [iceConfig, setIceConfig] = useState({
     iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
+     {
+       "urls": "turn:coturn.streamalong.live:3478?transport=udp",
+       "username": "vikram",
+       "credential": "vikram"
+     },
     ],
   });
 
   useEffect(() => {
+    console.log('Fetching ICE configuration...');
     const fetchICE = async () => {
-      console.log('Fetching ICE configuration...');
       try {
         const res = await fetch(
           'https://saluslivestream.metered.live/api/v1/turn/credentials?apiKey=55b40b68db82fa6d95da9a535f2371abbee1'
         );
         const data = await res.json();
-        console.log('Fetched ICE servers:', data);
-        setIceConfig((prev) => ({
-          iceServers: [...prev.iceServers, ...data],
-        }));
+        console.log('Fetched ICE servers:', iceConfig);
+//         setIceConfig((prev) => ({
+//           iceServers: [...prev.iceServers, ...data],
+//         }));
       } catch (err) {
-        console.warn('Failed to fetch TURN servers. Using fallback:', err);
-        setError('Failed to fetch TURN servers');
+        console.warn('Failed to fetch TURN servers. Using STUN only:', err);
+        setError('Failed to fetch TURN servers, using STUN');
       }
     };
     fetchICE();
+
+    // Log device info for debugging
+    setDeviceInfo(`Platform: ${RNPlatform.OS}, Version: ${RNPlatform.Version}`);
+    console.log('Device Info:', deviceInfo);
   }, []);
 
   useEffect(() => {
@@ -74,14 +86,14 @@ export default function App() {
       console.log('Socket connected');
       setSocketIsConnected(true);
       if (roomId && joined) {
-        socket.emit(isHost ? 'create-room' : 'join-room', roomId);
+        socket.emit(isHostRef.current ? 'create-room' : 'join-room', roomId);
       }
     });
     socket.on('reconnect', () => {
       console.log('Socket reconnected');
       setSocketIsConnected(true);
       if (roomId && joined) {
-        socket.emit(isHost ? 'create-room' : 'join-room', roomId);
+        socket.emit(isHostRef.current ? 'create-room' : 'join-room', roomId);
       }
     });
     socket.on('disconnect', () => {
@@ -93,6 +105,7 @@ export default function App() {
       console.log('Room created');
       setJoined(true);
       setIsHost(true);
+      isHostRef.current = true;
       setLoading(false);
     });
 
@@ -100,6 +113,7 @@ export default function App() {
       console.log('Room joined, host streaming:', isHostStreaming);
       setJoined(true);
       setIsHost(false);
+      isHostRef.current = false;
       setIsHostStreaming(isHostStreaming);
       setLoading(false);
     });
@@ -133,20 +147,27 @@ export default function App() {
     });
     socket.on('room-closed', endStream);
     socket.on('user-left', handleUserLeft);
-    socket.on('user-joined', handleUserJoined);
+    socket.on('user-joined', (id) => {
+      console.log(`Received user-joined event for ${id}, isHost: ${isHostRef.current}`);
+      handleUserJoined(id);
+    });
     socket.on('viewer-joined', handleViewerJoined);
     socket.on('offer', handleReceiveOffer);
     socket.on('answer', handleAnswer);
     socket.on('ice-candidate', handleNewICECandidate);
+    socket.on('error', ({ error }) => {
+      console.error('Socket error:', error);
+      setError(error);
+    });
 
     return () => {
       console.log('Cleaning up socket listeners...');
       socket.removeAllListeners();
     };
-  }, []); // Empty dependency array for one-time setup
+  }, []);
 
   useEffect(() => {
-    if (!isHost) return; // Skip stream setup for viewers
+    if (!isHostRef.current) return;
     const setupStream = async () => {
       console.log('Setting up local stream...');
       try {
@@ -156,7 +177,7 @@ export default function App() {
         }
         const stream = await mediaDevices.getUserMedia({
           audio: true,
-          video: { facingMode: 'user' },
+          video: { facingMode: 'user', width: 320, height: 240, frameRate: 15 },
         });
         console.log('Local stream setup successful:', stream);
         setLocalStream(stream);
@@ -190,18 +211,21 @@ export default function App() {
   }, [isHost]);
 
   useEffect(() => {
-    // Update streamStateRef when state changes
     streamStateRef.current.localStream = localStream;
     streamStateRef.current.isStreaming = isStreaming;
     console.log('Stream state changed:', streamStateRef.current);
 
-    // Process pending viewers when stream is ready
-    if (isHost && localStream && isStreaming && pendingViewersRef.current.length > 0) {
+    if (
+      isHostRef.current &&
+      streamStateRef.current.localStream &&
+      streamStateRef.current.isStreaming &&
+      pendingViewersRef.current.length > 0
+    ) {
       console.log('Processing pending viewers:', pendingViewersRef.current);
       pendingViewersRef.current.forEach((id) => handleUserJoined(id));
       pendingViewersRef.current = [];
     }
-  }, [localStream, isStreaming, isHost]);
+  }, [localStream, isStreaming]);
 
   const requestPermissions = async () => {
     console.log('Requesting permissions...');
@@ -262,7 +286,7 @@ export default function App() {
       if (!streamStateRef.current.localStream) {
         console.log('Initializing new stream...');
         const stream = await mediaDevices.getUserMedia({
-          video: { facingMode: isFrontCamera ? 'user' : 'environment' },
+          video: { facingMode: isFrontCamera ? 'user' : 'environment', width: 320, height: 240, frameRate: 15 },
           audio: true,
         });
         console.log('New stream initialized:', stream);
@@ -275,7 +299,12 @@ export default function App() {
       console.log('Stream state updated:', streamStateRef.current);
       socket.emit('host-streaming', roomId);
 
-      // Process existing peer connections
+      if (pendingViewersRef.current.length > 0) {
+        console.log('Processing pending viewers in startStream:', pendingViewersRef.current);
+        pendingViewersRef.current.forEach((id) => handleUserJoined(id));
+        pendingViewersRef.current = [];
+      }
+
       for (const id of Object.keys(peersRef.current)) {
         const pc = peersRef.current[id];
         if (!pc || pc.connectionState === 'closed') continue;
@@ -285,8 +314,8 @@ export default function App() {
             pc.addTrack(track, streamStateRef.current.localStream);
           });
           const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          console.log(`Sending offer to ${id}:`, offer);
+          await safeSetLocalDescription(pc, offer, id);
+          console.log(`Sending offer to ${id}:`, pc.localDescription);
           socket.emit('offer', { target: id, sdp: pc.localDescription });
         } catch (err) {
           console.error(`Error processing peer ${id} in startStream:`, err);
@@ -301,17 +330,89 @@ export default function App() {
     }
   };
 
-  const createPeerConnection = (id) => {
-    console.log(`Creating peer connection for ${id}`);
-    const existingPc = peersRef.current[id];
-    if (existingPc && existingPc.connectionState !== 'closed' && existingPc.connectionState !== 'failed') {
-      console.log(`Reusing existing peer connection for ${id}`);
-      return existingPc;
+  const filterSDP = (sdp) => {
+    console.log('Filtering SDP to simplify codecs...');
+    console.log('Raw SDP:', sdp);
+    const lines = sdp.split('\r\n');
+    const filteredLines = [];
+    let inAudioSection = false;
+    let inVideoSection = false;
+    let videoSsrcCount = 0;
+
+    for (const line of lines) {
+      if (line.startsWith('m=audio')) {
+        inAudioSection = true;
+        inVideoSection = false;
+        filteredLines.push('m=audio 9 UDP/TLS/RTP/SAVPF 111');
+        continue;
+      }
+      if (line.startsWith('m=video')) {
+        inVideoSection = true;
+        inAudioSection = false;
+        filteredLines.push('m=video 9 UDP/TLS/RTP/SAVPF 96');
+        continue;
+      }
+      if (inAudioSection) {
+        if (
+          line.startsWith('a=rtpmap:111 opus/48000') ||
+          line.startsWith('a=fmtp:111') ||
+          line.startsWith('a=rtcp-fb:111') ||
+          line.startsWith('a=ssrc:') ||
+          line.startsWith('a=msid:') ||
+          line.startsWith('a=ice-') ||
+          line.startsWith('a=fingerprint:') ||
+          line.startsWith('a=setup:') ||
+          line.startsWith('a=mid:') ||
+          line.startsWith('a=sendonly') ||
+          line.startsWith('a=rtcp-mux') ||
+          line.startsWith('c=') ||
+          line.startsWith('a=rtcp:')
+        ) {
+          filteredLines.push(line);
+        }
+      } else if (inVideoSection) {
+        if (
+          line.startsWith('a=rtpmap:96 H264/90000') ||
+          line.startsWith('a=fmtp:96') ||
+          line.startsWith('a=rtcp-fb:96') ||
+          (line.startsWith('a=ssrc:') && videoSsrcCount < 1) ||
+          line.startsWith('a=msid:') ||
+          line.startsWith('a=ice-') ||
+          line.startsWith('a=fingerprint:') ||
+          line.startsWith('a=setup:') ||
+          line.startsWith('a=mid:') ||
+          line.startsWith('a=sendonly') ||
+          line.startsWith('a=rtcp-mux') ||
+          line.startsWith('a=rtcp-rsize') ||
+          line.startsWith('c=') ||
+          line.startsWith('a=rtcp:')
+        ) {
+          if (line.startsWith('a=ssrc:')) {
+            videoSsrcCount++;
+          }
+          filteredLines.push(line);
+        }
+      } else {
+        filteredLines.push(line);
+      }
     }
 
+    const filteredSdp = filteredLines.join('\r\n');
+    console.log('Filtered SDP:', filteredSdp);
+    return filteredSdp;
+  };
+
+  const createPeerConnection = (id) => {
+    console.log(`Creating peer connection for ${id}`);
     try {
-      const pc = new RTCPeerConnection(iceConfig);
-      console.log('New peer connection created:', pc);
+      const pc = new RTCPeerConnection({
+        ...iceConfig,
+        sdpSemantics: 'unified-plan',
+      });
+      console.log('New peer connection created:', {
+        signalingState: pc.signalingState,
+        connectionState: pc.connectionState,
+      });
 
       pc.onicecandidate = (event) => {
         if (event.candidate) {
@@ -324,12 +425,18 @@ export default function App() {
         }
       };
 
+      pc.onicecandidateerror = (event) => {
+        console.error(`ICE candidate error for ${id}:`, event);
+        setError(`ICE candidate error for viewer ${id}: ${event.errorText}`);
+      };
+
       pc.ontrack = (event) => {
         console.log(`Received remote stream for ${id}:`, event.streams[0]);
-        setRemoteStreams((prev) => ({
-          ...prev,
-          [id]: event.streams[0],
-        }));
+        setRemoteStreams((prev) => {
+          const updated = { ...prev, [id]: event.streams[0] };
+          console.log('Updated remote streams:', updated);
+          return updated;
+        });
       };
 
       pc.onconnectionstatechange = () => {
@@ -343,7 +450,16 @@ export default function App() {
         }
       };
 
+      pc.onsignalingstatechange = () => {
+        console.log(`Signaling state for ${id}: ${pc.signalingState}`);
+      };
+
+      pc.onnegotiationneeded = () => {
+        console.log(`Negotiation needed for ${id}`);
+      };
+
       peersRef.current[id] = pc;
+      iceCandidateBuffer.current[id] = iceCandidateBuffer.current[id] || [];
       return pc;
     } catch (err) {
       console.error(`Error creating peer connection for ${id}:`, err);
@@ -352,45 +468,170 @@ export default function App() {
     }
   };
 
-  const handleUserJoined = async (id) => {
-    console.log(`Handling user joined: ${id}`);
-    if (!isHost) return;
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-    console.log('Stream state (ref):', streamStateRef.current);
-    if (!streamStateRef.current.localStream || !streamStateRef.current.isStreaming) {
-      console.warn('Local stream or streaming not ready, queuing viewer');
+  const safeSetLocalDescription = async (pc, offer, id, retryCount = 0) => {
+    console.log(`Attempting to set local description for ${id}, retry: ${retryCount}`);
+    try {
+      if (!offer || !offer.type || !offer.sdp) {
+        throw new Error('Invalid offer: missing type or SDP');
+      }
+      if (!pc || pc.signalingState === 'closed') {
+        throw new Error('Peer connection is closed or invalid');
+      }
+      if (pc.signalingState !== 'stable' && pc.signalingState !== 'have-local-offer') {
+        console.warn(`Unexpected signaling state for ${id}: ${pc.signalingState}, resetting connection`);
+        try {
+          pc.close();
+        } catch (closeErr) {
+          console.error(`Error closing peer connection for ${id}:`, closeErr);
+        }
+        delete peersRef.current[id];
+        throw new Error('Invalid signaling state, connection reset');
+      }
+
+      // Temporarily bypass SDP filtering to test raw SDP
+      const sessionOffer = {
+        type: offer.type,
+        sdp: offer.sdp, // Use raw SDP
+      };
+      console.log(`Setting local description for ${id}:`, sessionOffer);
+      await pc.setLocalDescription(sessionOffer);
+
+      await new Promise(resolve => {
+        if (pc.iceGatheringState === 'complete') return resolve();
+        const checkState = () => {
+          if (pc.iceGatheringState === 'complete') {
+            pc.removeEventListener('icegatheringstatechange', checkState);
+            resolve();
+          }
+        };
+        pc.addEventListener('icegatheringstatechange', checkState);
+      });
+
+      console.log(`Local description set for ${id}:`, pc.localDescription);
+      return true;
+    } catch (err) {
+      console.error(`Error setting local description for ${id}:`, err);
+      setError(`Failed to set local description for ${id}: ${err.message}`);
+      if (retryCount < 1) {
+        console.log(`Retrying setLocalDescription for ${id} with filtered SDP`);
+        try {
+          if (!pc || pc.signalingState === 'closed') {
+            throw new Error('Peer connection is closed or invalid');
+          }
+          const filteredOffer = {
+            type: offer.type,
+            sdp: filterSDP(offer.sdp),
+          };
+          console.log(`Setting local description (filtered SDP) for ${id}:`, filteredOffer);
+          await pc.setLocalDescription(filteredOffer);
+          console.log(`Local description set for ${id} (filtered SDP):`, pc.localDescription);
+          return true;
+        } catch (filterErr) {
+          console.error(`Error setting local description (filtered SDP) for ${id}:`, filterErr);
+          setError(`Failed to set local description (filtered SDP) for ${id}: ${filterErr.message}`);
+          throw filterErr;
+        }
+      }
+      throw err;
+    }
+  };
+
+  const handleUserJoined = async (id, retryCount = 0) => {
+    console.log(`Handling user joined: ${id}, isHost: ${isHostRef.current}, retry: ${retryCount}`);
+    if (!isHostRef.current) {
+      console.log('Not host, queuing viewer');
       pendingViewersRef.current = [...pendingViewersRef.current, id];
       return;
     }
 
+    const maxRetries = 3;
     try {
+      console.log('Stream state (ref):', streamStateRef.current);
+      if (!streamStateRef.current.localStream || !streamStateRef.current.isStreaming) {
+        console.warn('Local stream or streaming not ready, queuing viewer');
+        pendingViewersRef.current = [...pendingViewersRef.current, id];
+        return;
+      }
+
       if (!streamStateRef.current.localStream.getTracks || !streamStateRef.current.localStream.getTracks().length) {
         throw new Error('Invalid local stream: No tracks available');
       }
 
-      const pc = createPeerConnection(id);
+      let pc = peersRef.current[id];
+      if (!pc || pc.signalingState === 'closed') {
+        pc = createPeerConnection(id);
+      }
       if (!pc) {
         throw new Error('Failed to create peer connection');
       }
 
-      streamStateRef.current.localStream.getTracks().forEach((track) => {
+      console.log(`Peer connection state for ${id}: ${pc.signalingState}`);
+      const tracks = streamStateRef.current.localStream.getTracks().filter(
+        (track) => track.enabled && track.readyState === 'live' && ['audio', 'video'].includes(track.kind)
+      );
+      if (tracks.length === 0) {
+        throw new Error('No valid tracks available to add');
+      }
+
+      // Validate and select one audio and one video track
+      let audioTrack = tracks.find((t) => t.kind === 'audio');
+      let videoTrack = tracks.find((t) => t.kind === 'video');
+      const selectedTracks = [audioTrack, videoTrack].filter(Boolean);
+      if (selectedTracks.length === 0) {
+        throw new Error('No valid audio or video tracks available');
+      }
+      selectedTracks.forEach((track) => {
         console.log(`Adding track to ${id}:`, track);
         pc.addTrack(track, streamStateRef.current.localStream);
       });
 
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      console.log(`Sending offer to ${id}:`, offer);
-      socket.emit('offer', { target: id, sdp: pc.localDescription });
+      try {
+        console.log(`Creating offer for ${id}`);
+        const offerOptions = {
+          offerToReceiveAudio: false,
+          offerToReceiveVideo: false,
+        };
+        const offer = await pc.createOffer(offerOptions);
+        console.log(`Offer created for ${id}:`, offer);
+        if (!offer || !offer.type || !offer.sdp || typeof offer.sdp !== 'string' || offer.sdp.trim() === '') {
+          throw new Error('Invalid offer: null or empty SDP');
+        }
+
+        await safeSetLocalDescription(pc, offer, id);
+        socket.emit('offer', { target: id, sdp: pc.localDescription });
+      } catch (err) {
+        console.error(`Error in offer process for ${id}:`, err);
+        setError(`Failed to create or set offer for viewer ${id}`);
+        try {
+          pc.close();
+          delete peersRef.current[id];
+        } catch (closeErr) {
+          console.error(`Error closing peer connection for ${id}:`, closeErr);
+        }
+        if (retryCount < maxRetries) {
+          console.log(`Retrying handleUserJoined for ${id}`);
+          await delay(1000);
+          return handleUserJoined(id, retryCount + 1);
+        }
+        console.warn(`Max retries reached for ${id}, queuing viewer`);
+        pendingViewersRef.current = [...pendingViewersRef.current, id];
+      }
     } catch (error) {
       console.error(`Error in handleUserJoined for ${id}:`, error);
       setError(`Failed to connect to viewer ${id}`);
+      if (retryCount < maxRetries) {
+        console.log(`Retrying handleUserJoined for ${id}`);
+        await delay(1000);
+        return handleUserJoined(id, retryCount + 1);
+      }
     }
   };
 
   const handleViewerJoined = (hostId) => {
     console.log(`Viewer joined, waiting for offer from host: ${hostId}`);
-    if (isHost) return;
+    if (isHostRef.current) return;
     createPeerConnection(hostId);
   };
 
@@ -403,6 +644,16 @@ export default function App() {
       }
 
       await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      console.log(`Remote description set for ${sender}`);
+
+      if (iceCandidateBuffer.current[sender] && iceCandidateBuffer.current[sender].length > 0) {
+        console.log(`Processing buffered ICE candidates for ${sender}`);
+        for (const candidate of iceCandidateBuffer.current[sender]) {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        }
+        iceCandidateBuffer.current[sender] = [];
+      }
+
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       console.log(`Sending answer to ${sender}:`, answer);
@@ -419,6 +670,7 @@ export default function App() {
     if (pc) {
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+        console.log(`Remote description set for ${sender}`);
       } catch (error) {
         console.error(`Error in handleAnswer for ${sender}:`, error);
         setError('Failed to process answer');
@@ -431,7 +683,14 @@ export default function App() {
     const pc = peersRef.current[sender];
     if (pc) {
       try {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        if (pc.remoteDescription) {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          console.log(`ICE candidate added for ${sender}`);
+        } else {
+          console.log(`Buffering ICE candidate for ${sender} (no remote description yet)`);
+          iceCandidateBuffer.current[sender] = iceCandidateBuffer.current[sender] || [];
+          iceCandidateBuffer.current[sender].push(candidate);
+        }
       } catch (error) {
         console.error(`Error in handleNewICECandidate for ${sender}:`, error);
         setError('Failed to process ICE candidate');
@@ -456,6 +715,7 @@ export default function App() {
       return updated;
     });
     pendingViewersRef.current = pendingViewersRef.current.filter((viewerId) => viewerId !== id);
+    delete iceCandidateBuffer.current[id];
   };
 
   const endStream = () => {
@@ -479,9 +739,11 @@ export default function App() {
     });
     peersRef.current = {};
     pendingViewersRef.current = [];
+    iceCandidateBuffer.current = {};
     setIsStreaming(false);
     setJoined(false);
     setIsHost(false);
+    isHostRef.current = false;
     setLocalStream(null);
     streamStateRef.current.isStreaming = false;
     setRemoteStreams({});
@@ -493,7 +755,7 @@ export default function App() {
     setIsFrontCamera((prev) => !prev);
     try {
       const newStream = await mediaDevices.getUserMedia({
-        video: { facingMode: isFrontCamera ? 'environment' : 'user' },
+        video: { facingMode: isFrontCamera ? 'environment' : 'user', width: 320, height: 240, frameRate: 15 },
         audio: false,
       });
       const newVideoTrack = newStream.getVideoTracks()[0];
@@ -596,7 +858,7 @@ export default function App() {
           <View style={{ alignItems: 'center', justifyContent: 'center', flex: 1 }}>
             <ActivityIndicator size="large" color="#2196F3" />
             <Text style={{ color: 'white', marginTop: 10 }}>
-              Waiting for host to start streaming...
+              {isHostStreaming ? 'Connecting to stream...' : 'Waiting for host to start streaming...'}
             </Text>
           </View>
         )}
@@ -620,8 +882,8 @@ export default function App() {
     <SafeAreaView style={styles.container}>
       <Text style={styles.title}>🎥 Live Stream App</Text>
       {!joined && renderJoinScreen()}
-      {joined && isHost && !isStreaming && renderHostControls()}
-      {joined && !isHost && renderViewerScreen()}
+      {joined && isHostRef.current && !isStreaming && renderHostControls()}
+      {joined && !isHostRef.current && renderViewerScreen()}
       {isStreaming && renderStreamingScreen()}
       {error && <Text style={styles.errorText}>{error}</Text>}
     </SafeAreaView>
