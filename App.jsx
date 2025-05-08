@@ -1,18 +1,38 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, createContext, useContext } from 'react';
 import {
   View,
   Text,
   TextInput,
-  Button,
   ScrollView,
   PermissionsAndroid,
   Platform,
   StyleSheet,
   TouchableOpacity,
+  Alert,
+  FlatList,
+  Animated,
 } from 'react-native';
-import { ActivityIndicator } from 'react-native';
+import { ActivityIndicator, Dimensions } from 'react-native';
 import { RTCView, mediaDevices, RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } from 'react-native-webrtc';
 import io from 'socket.io-client';
+import Icon from 'react-native-vector-icons/MaterialIcons';
+
+// Theme Context
+const ThemeContext = createContext();
+
+const ThemeProvider = ({ children }) => {
+  const [theme, setTheme] = useState('dark');
+
+  const toggleTheme = () => {
+    setTheme(prev => (prev === 'dark' ? 'light' : 'dark'));
+  };
+
+  return (
+    <ThemeContext.Provider value={{ theme, toggleTheme }}>
+      {children}
+    </ThemeContext.Provider>
+  );
+};
 
 const socket = io('https://streamingbackend-eh65.onrender.com', {
   reconnection: true,
@@ -30,7 +50,10 @@ const iceServers = {
   ],
 };
 
+const { width, height } = Dimensions.get('window');
+
 const App = () => {
+  const { theme, toggleTheme } = useContext(ThemeContext);
   const [roomId, setRoomId] = useState('');
   const [joined, setJoined] = useState(false);
   const [isHost, setIsHost] = useState(false);
@@ -40,14 +63,25 @@ const App = () => {
   const [error, setError] = useState('');
   const [viewers, setViewers] = useState([]);
   const [localStream, setLocalStream] = useState(null);
-  const [remoteStream, setRemoteStream] = useState(null);
+  const [remoteStreams, setRemoteStreams] = useState([]); // Updated to handle multiple streams
   const [isMuted, setIsMuted] = useState(false);
   const [isFrontCamera, setIsFrontCamera] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [streamRequest, setStreamRequest] = useState(null);
+  const [hasRequestedStream, setHasRequestedStream] = useState(false);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState('');
+  const [reactions, setReactions] = useState([]);
+  const [streamQuality, setStreamQuality] = useState('720p');
+  const [viewerList, setViewerList] = useState([]);
+  const [streamStats, setStreamStats] = useState({ duration: 0, peakViewers: 0 });
+  const [approvedStreamers, setApprovedStreamers] = useState([]); // Track approved streamers
 
   const peerConnectionRef = useRef(null);
   const localStreamRef = useRef(null);
   const peerConnections = useRef({});
+  const chatScrollRef = useRef(null);
+  const reactionAnim = useRef(new Animated.Value(0)).current;
 
   const requestPermissions = async () => {
     if (Platform.OS === 'android') {
@@ -72,11 +106,12 @@ const App = () => {
       setLoading(false);
     });
 
-    socket.on('room-joined', ({ roomId, hostId, isHostStreaming, viewerCount }) => {
+    socket.on('room-joined', ({ roomId, hostId, isHostStreaming, viewerCount, viewerList }) => {
       setJoined(true);
       setIsHost(false);
       setHostId(hostId);
       setViewerCount(viewerCount);
+      setViewerList(viewerList);
       setIsStreaming(isHostStreaming);
       setLoading(false);
     });
@@ -96,7 +131,11 @@ const App = () => {
       setLoading(false);
     });
 
-    socket.on('room-info', ({ viewerCount }) => setViewerCount(viewerCount));
+    socket.on('room-info', ({ viewerCount, viewerList }) => {
+      setViewerCount(viewerCount);
+      setViewerList(viewerList);
+      setStreamStats(prev => ({ ...prev, peakViewers: Math.max(prev.peakViewers, viewerCount) }));
+    });
 
     socket.on('user-joined', (viewerId) => {
       if (!localStreamRef.current || localStreamRef.current.getTracks().length === 0) {
@@ -134,6 +173,9 @@ const App = () => {
 
     socket.on('user-left', (viewerId) => {
       setViewers(prev => prev.filter(id => id !== viewerId));
+      setViewerList(prev => prev.filter(id => id !== viewerId));
+      setApprovedStreamers(prev => prev.filter(s => s !== viewerId));
+      setRemoteStreams(prev => prev.filter(s => s.id !== viewerId));
       if (peerConnections.current[viewerId]) {
         peerConnections.current[viewerId].close();
         delete peerConnections.current[viewerId];
@@ -141,6 +183,10 @@ const App = () => {
     });
 
     socket.on('host-started-streaming', () => setIsStreaming(true));
+
+    socket.on('user-started-streaming', ({ streamerId }) => {
+      setApprovedStreamers(prev => [...prev, streamerId]);
+    });
 
     socket.on('ice-candidate', ({ candidate, sender }) => {
       const pc = peerConnections.current[sender] || peerConnectionRef.current;
@@ -152,7 +198,13 @@ const App = () => {
     socket.on('offer', async ({ sdp, sender }) => {
       const peerConnection = new RTCPeerConnection(iceServers);
       peerConnection.ontrack = (event) => {
-        setRemoteStream(event.streams[0]);
+        setRemoteStreams(prev => {
+          const existing = prev.find(s => s.id === sender);
+          if (!existing) {
+            return [...prev, { id: sender, stream: event.streams[0] }];
+          }
+          return prev;
+        });
       };
       peerConnection.onicecandidate = (event) => {
         if (event.candidate) {
@@ -163,7 +215,7 @@ const App = () => {
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
       socket.emit('answer', { target: sender, sdp: answer });
-      peerConnectionRef.current = peerConnection;
+      peerConnections.current[sender] = peerConnection;
     });
 
     socket.on('answer', async ({ sdp, sender }) => {
@@ -185,8 +237,68 @@ const App = () => {
       setIsStreaming(false);
     });
 
-    return () => socket.removeAllListeners();
-  }, []);
+    socket.on('stream-request', ({ viewerId }) => {
+      if (isHost) {
+        setStreamRequest({ viewerId });
+        Alert.alert(
+          'Stream Request',
+          `Viewer ${viewerId} wants to stream. Allow?`,
+          [
+            {
+              text: 'Allow',
+              onPress: () => {
+                socket.emit('stream-permission', { viewerId, allowed: true });
+                setStreamRequest(null);
+              },
+            },
+            {
+              text: 'Deny',
+              onPress: () => {
+                socket.emit('stream-permission', { viewerId, allowed: false });
+                setStreamRequest(null);
+              },
+            },
+          ]
+        );
+      }
+    });
+
+    socket.on('stream-permission', ({ allowed }) => {
+      if (allowed) {
+        startStreaming();
+        setHasRequestedStream(false);
+      } else {
+        Alert.alert('Request Denied', 'Streaming request declined by host.');
+        setHasRequestedStream(false);
+      }
+    });
+
+    socket.on('chat-message', ({ senderId, message }) => {
+      setChatMessages(prev => [...prev, { id: Date.now(), senderId, message }]);
+      chatScrollRef.current?.scrollToEnd({ animated: true });
+    });
+
+    socket.on('reaction', ({ senderId, type }) => {
+      setReactions(prev => [...prev, { id: Date.now(), senderId, type }]);
+      Animated.sequence([
+        Animated.timing(reactionAnim, { toValue: 1, duration: 500, useNativeDriver: true }),
+        Animated.timing(reactionAnim, { toValue: 0, duration: 500, useNativeDriver: true }),
+      ]).start(() => {
+        setReactions(prev => prev.filter(r => r.id !== Date.now()));
+      });
+    });
+
+    const statsInterval = setInterval(() => {
+      if (isStreaming) {
+        setStreamStats(prev => ({ ...prev, duration: prev.duration + 1 }));
+      }
+    }, 1000);
+
+    return () => {
+      socket.removeAllListeners();
+      clearInterval(statsInterval);
+    };
+  }, [isStreaming]);
 
   const createRoom = () => {
     if (roomId.trim() === '') return setError('Please enter a room ID.');
@@ -200,10 +312,18 @@ const App = () => {
     socket.emit('join-room', roomId);
   };
 
+  const requestStreamPermission = () => {
+    socket.emit('stream-request', { roomId, viewerId: socket.id });
+    setHasRequestedStream(true);
+  };
+
   const startStreaming = async () => {
     try {
       await requestPermissions();
-      const stream = await mediaDevices.getUserMedia({ video: true, audio: true });
+      const stream = await mediaDevices.getUserMedia({
+        video: { width: streamQuality === '720p' ? 1280 : 640, height: streamQuality === '720p' ? 720 : 360 },
+        audio: true,
+      });
       setLocalStream(stream);
       localStreamRef.current = stream;
 
@@ -214,16 +334,22 @@ const App = () => {
 
       peerConnectionRef.current.onicecandidate = (event) => {
         if (event.candidate) {
-          console.log('Host ICE candidate:', event.candidate);
+          console.log('ICE candidate:', event.candidate);
         }
       };
 
-      socket.emit('host-streaming', roomId);
+      if (isHost) {
+        socket.emit('host-streaming', roomId);
+      } else {
+        socket.emit('user-started-streaming', { roomId, streamerId: socket.id });
+      }
+      setIsStreaming(true);
     } catch (err) {
       console.error('Streaming error:', err);
       setError('Failed to start streaming.');
     }
   };
+
   const stopStreaming = () => {
     if (peerConnectionRef.current) {
       peerConnectionRef.current.close();
@@ -234,14 +360,7 @@ const App = () => {
       setLocalStream(null);
     }
     setIsStreaming(false);
-    socket.emit('stop-streaming', roomId); // Notify the server to stop the streaming
-  };
-  const toggleStreaming = () => {
-    if (isStreaming) {
-      stopStreaming();
-    } else {
-      startStreaming();
-    }
+    socket.emit('stop-streaming', roomId);
   };
 
   const leaveRoom = () => {
@@ -249,13 +368,20 @@ const App = () => {
     setJoined(false);
     setIsStreaming(false);
     setViewers([]);
+    setViewerList([]);
+    setApprovedStreamers([]);
+    setRemoteStreams([]);
     setRoomId('');
+    setHasRequestedStream(false);
+    setChatMessages([]);
+    setReactions([]);
+    setStreamStats({ duration: 0, peakViewers: 0 });
     setTimeout(() => {
-      setError("");
+      setError('');
     }, 4000);
 
     localStream?.getTracks().forEach(track => track.stop());
-    remoteStream?.getTracks().forEach(track => track.stop());
+    remoteStreams.forEach(s => s.stream.getTracks().forEach(track => track.stop()));
     Object.values(peerConnections.current).forEach(pc => pc.close());
     peerConnections.current = {};
   };
@@ -274,7 +400,6 @@ const App = () => {
       const videoTrack = localStreamRef.current
         .getVideoTracks()
         .find(track => typeof track._switchCamera === 'function');
-
       if (videoTrack) {
         videoTrack._switchCamera();
         setIsFrontCamera(prev => !prev);
@@ -282,198 +407,591 @@ const App = () => {
     }
   };
 
-  return (
-    <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.title}>🎥 Live Streaming App</Text>
+  const sendChatMessage = () => {
+    if (chatInput.trim() === '') return;
+    socket.emit('chat-message', { roomId, message: chatInput });
+    setChatInput('');
+  };
 
+  const sendReaction = (type) => {
+    socket.emit('reaction', { roomId, type });
+  };
+
+  const changeStreamQuality = (quality) => {
+    setStreamQuality(quality);
+    if (isStreaming) {
+      stopStreaming();
+      setTimeout(startStreaming, 500);
+    }
+  };
+
+  const renderChatMessage = ({ item }) => (
+    <View style={styles(theme).chatMessage}>
+      <Text style={styles(theme).chatSender}>{item.senderId}: </Text>
+      <Text style={styles(theme).chatText}>{item.message}</Text>
+    </View>
+  );
+
+  const renderViewer = ({ item }) => (
+    <View style={styles(theme).viewerItem}>
+      <Text style={styles(theme).viewerText}>{item}</Text>
+    </View>
+  );
+
+  const renderStream = ({ item }) => (
+    <View style={styles(theme).streamItem}>
+      <RTCView
+        streamURL={item.stream.toURL()}
+        style={styles(theme).streamVideo}
+        objectFit="cover"
+        mirror={true}
+      />
+      <Text style={styles(theme).streamerId}>{item.id}</Text>
+    </View>
+  );
+
+  return (
+    <View style={styles(theme).container}>
       {!joined ? (
-        <View style={styles.formContainer}>
+        <View style={styles(theme).joinContainer}>
+          <Text style={styles(theme).title}>LiveStream</Text>
           <TextInput
             placeholder="Enter Room ID"
+            placeholderTextColor={theme === 'dark' ? '#888' : '#666'}
             value={roomId}
             onChangeText={setRoomId}
-            style={styles.input}
+            style={styles(theme).input}
           />
           {loading ? (
-            <ActivityIndicator size="large" color="#0000ff" style={styles.loader} />
+            <ActivityIndicator size="large" color="#ff2d55" style={styles(theme).loader} />
           ) : (
-            <>
-              <TouchableOpacity style={styles.button} onPress={createRoom}>
-                <Text style={styles.buttonText}>Create Room</Text>
+            <View style={styles(theme).buttonContainer}>
+              <TouchableOpacity style={styles(theme).button} onPress={createRoom}>
+                <Text style={styles(theme).buttonText}>Create Room</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.button} onPress={joinRoom}>
-                <Text style={styles.buttonText}>Join Room</Text>
+              <TouchableOpacity style={styles(theme).button} onPress={joinRoom}>
+                <Text style={styles(theme).buttonText}>Join Room</Text>
               </TouchableOpacity>
-            </>
-          )}
-          {error ? <Text style={styles.error}>{error}</Text> : null}
-        </View>
-      ) : (
-        <View style={styles.roomInfo}>
-          <Text style={styles.roomText}>Room ID: {roomId}</Text>
-          <Text style={styles.roomText}>You are the {isHost ? 'Host' : 'Viewer'}</Text>
-          <Text style={styles.roomText}>👁️ Viewers: {viewerCount}</Text>
-
-          {isHost && (
-            <View style={styles.streamBox}>
-              {localStream && (
-                <RTCView
-                  streamURL={localStream.toURL()}
-                  style={styles.fullScreenVideo}
-                  objectFit="cover"
-                  mirror={isFrontCamera}
-                />
-              )}
-              <View style={styles.controls}>
-                <TouchableOpacity style={styles.controlButton} onPress={toggleMute}>
-                  <Text style={styles.buttonText}>{isMuted ? "Unmute" : "Mute"}</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.controlButton} onPress={switchCamera}>
-                  <Text style={styles.buttonText}>Switch Camera</Text>
-                </TouchableOpacity>
-              </View>
-              {!isStreaming ? (
-                <TouchableOpacity style={styles.startStreamingButton} onPress={startStreaming}>
-                  <Text style={styles.buttonText}>Start Streaming</Text>
-                </TouchableOpacity>
-              ) : (
-                <Text style={styles.streamingText}>🔴 Streaming Live</Text>
-              )}
             </View>
           )}
-
-          {!isHost && isStreaming && remoteStream && (
-            <View style={styles.streamBox}>
+          <TouchableOpacity style={styles(theme).themeButton} onPress={toggleTheme}>
+            <Icon
+              name={theme === 'dark' ? 'brightness-7' : 'brightness-4'}
+              size={24}
+              color={theme === 'dark' ? '#fff' : '#000'}
+            />
+          </TouchableOpacity>
+          {error ? <Text style={styles(theme).error}>{error}</Text> : null}
+        </View>
+      ) : (
+        <View style={styles(theme).streamContainer}>
+          <View style={styles(theme).videoContainer}>
+            {isHost && localStream ? (
               <RTCView
-                streamURL={remoteStream.toURL()}
-                style={styles.fullScreenVideo}
+                streamURL={localStream.toURL()}
+                style={styles(theme).video}
+                objectFit="cover"
+                mirror={isFrontCamera}
+              />
+            ) : remoteStreams.length > 0 ? (
+              <RTCView
+                streamURL={remoteStreams.find(s => s.id === hostId)?.stream.toURL() || ''}
+                style={styles(theme).video}
                 objectFit="cover"
                 mirror={true}
               />
-              <Text style={styles.viewingText}>📡 Watching stream...</Text>
-              <Text style={styles.roomText}>👁️ Viewers: {viewerCount}</Text>
+            ) : !isHost && localStream ? (
+              <RTCView
+                streamURL={localStream.toURL()}
+                style={styles(theme).video}
+                objectFit="cover"
+                mirror={isFrontCamera}
+              />
+            ) : (
+              <View style={styles(theme).videoPlaceholder}>
+                <Text style={styles(theme).placeholderText}>
+                  {isStreaming ? 'Waiting for stream...' : 'No stream active'}
+                </Text>
+              </View>
+            )}
+            <View style={styles(theme).overlay}>
+              <View style={styles(theme).topBar}>
+                <Text style={styles(theme).roomInfo}>Room: {roomId}</Text>
+                <Text style={styles(theme).viewerCount}>👥 {viewerCount}</Text>
+              </View>
+              {reactions.map(reaction => (
+                <Animated.Text
+                  key={reaction.id}
+                  style={[
+                    styles(theme).reaction,
+                    { transform: [{ translateY: reactionAnim.interpolate({ inputRange: [0, 1], outputRange: [0, -50] }) }] },
+                  ]}
+                >
+                  {reaction.type === 'like' ? '👍' : '❤️'}
+                </Animated.Text>
+              ))}
             </View>
-          )}
+          </View>
 
-          <TouchableOpacity style={styles.leaveButton} onPress={leaveRoom}>
-            <Text style={styles.buttonText}>Leave Room</Text>
+          <View style={styles(theme).contentContainer}>
+            {isHost ? (
+              <View style={styles(theme).hostControls}>
+                <View style={styles(theme).controlRow}>
+                  <TouchableOpacity style={styles(theme).controlButton} onPress={toggleMute}>
+                    <Icon name={isMuted ? 'mic-off' : 'mic'} size={24} color={theme === 'dark' ? '#fff' : '#000'} />
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles(theme).controlButton} onPress={switchCamera}>
+                    <Icon name="flip-camera-ios" size={24} color={theme === 'dark' ? '#fff' : '#000'} />
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles(theme).controlButton} onPress={toggleTheme}>
+                    <Icon
+                      name={theme === 'dark' ? 'brightness-7' : 'brightness-4'}
+                      size={24}
+                      color={theme === 'dark' ? '#fff' : '#000'}
+                    />
+                  </TouchableOpacity>
+                </View>
+                <View style={styles(theme).streamButtons}>
+                  {!isStreaming ? (
+                    <TouchableOpacity style={styles(theme).actionButton} onPress={startStreaming}>
+                      <Text style={styles(theme).buttonText}>Start Stream</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity style={[styles(theme).actionButton, styles(theme).stopButton]} onPress={stopStreaming}>
+                      <Text style={styles(theme).buttonText}>Stop Stream</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+                <View style={styles(theme).statsContainer}>
+                  <Text style={styles(theme).statsText}>
+                    Duration: {Math.floor(streamStats.duration / 60)}:{(streamStats.duration % 60).toString().padStart(2, '0')}
+                  </Text>
+                  <Text style={styles(theme).statsText}>Peak Viewers: {streamStats.peakViewers}</Text>
+                </View>
+              </View>
+            ) : (
+              <View style={styles(theme).viewerControls}>
+                {!isStreaming && (
+                  <TouchableOpacity
+                    style={[styles(theme).actionButton, hasRequestedStream && styles(theme).disabledButton]}
+                    onPress={requestStreamPermission}
+                    disabled={hasRequestedStream}
+                  >
+                    <Text style={styles(theme).buttonText}>
+                      {hasRequestedStream ? 'Awaiting Permission...' : 'Request to Stream'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                {localStream && (
+                  <View style={styles(theme).controlRow}>
+                    <TouchableOpacity style={styles(theme).controlButton} onPress={toggleMute}>
+                      <Icon name={isMuted ? 'mic-off' : 'mic'} size={24} color={theme === 'dark' ? '#fff' : '#000'} />
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles(theme).controlButton} onPress={switchCamera}>
+                      <Icon name="flip-camera-ios" size={24} color={theme === 'dark' ? '#fff' : '#000'} />
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles(theme).controlButton} onPress={toggleTheme}>
+                      <Icon
+                        name={theme === 'dark' ? 'brightness-7' : 'brightness-4'}
+                        size={24}
+                        color={theme === 'dark' ? '#fff' : '#000'}
+                      />
+                    </TouchableOpacity>
+                  </View>
+                )}
+                {isStreaming && (
+                  <View style={styles(theme).qualitySelector}>
+                    <Text style={styles(theme).qualityLabel}>Quality:</Text>
+                    {['720p', '480p'].map(quality => (
+                      <TouchableOpacity
+                        key={quality}
+                        style={[styles(theme).qualityButton, streamQuality === quality && styles(theme).qualityButtonActive]}
+                        onPress={() => changeStreamQuality(quality)}
+                      >
+                        <Text style={styles(theme).buttonText}>{quality}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+              </View>
+            )}
+
+            <View style={styles(theme).chatContainer}>
+              <FlatList
+                ref={chatScrollRef}
+                data={chatMessages}
+                renderItem={renderChatMessage}
+                keyExtractor={item => item.id.toString()}
+                style={styles(theme).chatList}
+              />
+              <View style={styles(theme).chatInputContainer}>
+                <TextInput
+                  placeholder="Type a message..."
+                  placeholderTextColor={theme === 'dark' ? '#888' : '#666'}
+                  value={chatInput}
+                  onChangeText={setChatInput}
+                  style={styles(theme).chatInput}
+                />
+                <TouchableOpacity style={styles(theme).sendButton} onPress={sendChatMessage}>
+                  <Icon name="send" size={24} color="#ff2d55" />
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            <View style={styles(theme).viewerListContainer}>
+              <Text style={styles(theme).sectionTitle}>Viewers</Text>
+              <FlatList
+                data={viewerList}
+                renderItem={renderViewer}
+                keyExtractor={item => item}
+                style={styles(theme).viewerList}
+              />
+            </View>
+
+            {approvedStreamers.length > 0 && (
+              <View style={styles(theme).streamsContainer}>
+                <Text style={styles(theme).sectionTitle}>Active Streams</Text>
+                <FlatList
+                  data={remoteStreams}
+                  renderItem={renderStream}
+                  keyExtractor={item => item.id}
+                  horizontal
+                  style={styles(theme).streamsList}
+                />
+              </View>
+            )}
+
+            {isStreaming && (
+              <View style={styles(theme).reactionContainer}>
+                <TouchableOpacity style={styles(theme).reactionButton} onPress={() => sendReaction('like')}>
+                  <Text style={styles(theme).reactionText}>👍</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles(theme).reactionButton} onPress={() => sendReaction('heart')}>
+                  <Text style={styles(theme).reactionText}>❤️</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </View>
+
+          <TouchableOpacity style={styles(theme).leaveButton} onPress={leaveRoom}>
+            <Text style={styles(theme).buttonText}>Leave Room</Text>
           </TouchableOpacity>
         </View>
       )}
-    </ScrollView>
+    </View>
   );
 };
 
-const styles = StyleSheet.create({
-  container: {
-    padding: 20,
-    backgroundColor: '#f8f8f8',
-    flex: 1,
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#1a73e8',
-    marginBottom: 20,
-    textAlign: 'center',
-  },
-  formContainer: {
-    marginTop: 50,
-    alignItems: 'center',
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: '#ccc',
-    borderRadius: 8,
-    padding: 12,
-    width: '80%',
-    marginVertical: 10,
-    backgroundColor: '#fff',
-    fontSize: 16,
-  },
-  button: {
-    backgroundColor: '#1a73e8',
-    paddingVertical: 12,
-    paddingHorizontal: 30,
-    borderRadius: 8,
-    marginVertical: 10,
-    width: '80%',
-    alignItems: 'center',
-  },
-  buttonText: {
-    color: '#fff',
-    fontSize: 16,
-  },
-  loader: {
-    marginVertical: 20,
-  },
-  error: {
-    color: 'red',
-    marginTop: 20,
-    fontSize: 14,
-  },
-  roomInfo: {
-    marginTop: 30,
-    alignItems: 'center',
-  },
-  roomText: {
-    fontSize: 18,
-    marginVertical: 5,
-  },
-  streamBox: {
-    width: '100%',
-    position: 'relative',
-  },
-  fullScreenVideo: {
-    width: '100%',
-    height: 350,
-    backgroundColor: '#000',
-    borderRadius: 12,
-    marginBottom: 15,
-  },
-  controls: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    width: '100%',
-    marginVertical: 10,
-  },
-  controlButton: {
-    backgroundColor: '#1a73e8',
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-  },
-  startStreamingButton: {
-    marginLeft:38,
-    backgroundColor: '#34a853',
-    paddingVertical: 12,
-    paddingHorizontal: 30,
-    borderRadius: 8,
-    width: '80%',
-    alignItems: 'center',
-  },
-  streamingText: {
-    fontSize: 16,
-    color: 'green',
-    fontWeight: 'bold',
-    textAlign: 'center',
-    marginTop: 20,
-  },
-  viewingText: {
-    fontSize: 18,
-    color: '#555',
-    marginTop: 10,
-    textAlign: 'center',
-  },
-  leaveButton: {
-    backgroundColor: '#ea4335',
-    paddingVertical: 12,
-    paddingHorizontal: 30,
-    borderRadius: 8,
-    marginTop: 20,
-    width: '80%',
-    alignItems: 'center',
-  },
-});
+const styles = (theme) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: theme === 'dark' ? '#121212' : '#f5f5f5',
+    },
+    joinContainer: {
+      flex: 1,
+      justifyContent: 'center',
+      alignItems: 'center',
+      padding: 20,
+    },
+    streamContainer: {
+      flex: 1,
+    },
+    title: {
+      fontSize: 32,
+      fontWeight: 'bold',
+      color: theme === 'dark' ? '#ff2d55' : '#d81b60',
+      marginBottom: 40,
+      textAlign: 'center',
+    },
+    input: {
+      backgroundColor: theme === 'dark' ? '#1e1e1e' : '#ffffff',
+      color: theme === 'dark' ? '#fff' : '#000',
+      borderRadius: 12,
+      padding: 15,
+      width: '80%',
+      marginBottom: 20,
+      fontSize: 16,
+      borderWidth: 1,
+      borderColor: theme === 'dark' ? '#333' : '#ccc',
+    },
+    buttonContainer: {
+      width: '80%',
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+    },
+    button: {
+      backgroundColor: '#ff2d55',
+      paddingVertical: 15,
+      paddingHorizontal: 20,
+      borderRadius: 12,
+      flex: 1,
+      marginHorizontal: 5,
+      alignItems: 'center',
+    },
+    buttonText: {
+      color: '#fff',
+      fontSize: 16,
+      fontWeight: '600',
+    },
+    themeButton: {
+      marginTop: 20,
+      padding: 10,
+      backgroundColor: theme === 'dark' ? '#1e1e1e' : '#e0e0e0',
+      borderRadius: 12,
+    },
+    loader: {
+      marginVertical: 20,
+    },
+    error: {
+      color: theme === 'dark' ? '#ff6b6b' : '#d32f2f',
+      marginTop: 20,
+      fontSize: 14,
+      textAlign: 'center',
+    },
+    videoContainer: {
+      width: '100%',
+      height: height * 0.4,
+      backgroundColor: '#000',
+      borderBottomLeftRadius: 20,
+      borderBottomRightRadius: 20,
+      overflow: 'hidden',
+      position: 'relative',
+    },
+    video: {
+      width: '100%',
+      height: '100%',
+    },
+    videoPlaceholder: {
+      flex: 1,
+      justifyContent: 'center',
+      alignItems: 'center',
+      backgroundColor: theme === 'dark' ? '#1e1e1e' : '#e0e0e0',
+    },
+    placeholderText: {
+      color: theme === 'dark' ? '#888' : '#666',
+      fontSize: 16,
+    },
+    overlay: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      padding: 10,
+    },
+    topBar: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      backgroundColor: theme === 'dark' ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.5)',
+      borderRadius: 8,
+      padding: 8,
+    },
+    roomInfo: {
+      color: theme === 'dark' ? '#fff' : '#000',
+      fontSize: 14,
+      fontWeight: '600',
+    },
+    viewerCount: {
+      color: theme === 'dark' ? '#fff' : '#000',
+      fontSize: 14,
+      fontWeight: '600',
+    },
+    contentContainer: {
+      flex: 1,
+      padding: 15,
+    },
+    hostControls: {
+      marginBottom: 15,
+    },
+    viewerControls: {
+      marginBottom: 15,
+    },
+    controlRow: {
+      flexDirection: 'row',
+      justifyContent: 'center',
+      marginVertical: 10,
+    },
+    controlButton: {
+      backgroundColor: theme === 'dark' ? '#1e1e1e' : '#e0eec0',
+      padding: 12,
+      borderRadius: 12,
+      marginHorizontal: 10,
+    },
+    streamButtons: {
+      flexDirection: 'row',
+      justifyContent: 'center',
+    },
+    actionButton: {
+      backgroundColor: '#ff2d55',
+      paddingVertical: 12,
+      paddingHorizontal: 20,
+      borderRadius: 12,
+      alignItems: 'center',
+      marginHorizontal: 5,
+      flex: 1,
+    },
+    stopButton: {
+      backgroundColor: '#ff6b6b',
+    },
+    disabledButton: {
+      backgroundColor: theme === 'dark' ? '#555' : '#b0b0b0',
+    },
+    statsContainer: {
+      marginTop: 10,
+      alignItems: 'center',
+    },
+    statsText: {
+      color: theme === 'dark' ? '#fff' : '#000',
+      fontSize: 14,
+    },
+    qualitySelector: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginVertical: 10,
+    },
+    qualityLabel: {
+      color: theme === 'dark' ? '#fff' : '#000',
+      fontSize: 14,
+      marginRight: 10,
+    },
+    qualityButton: {
+      backgroundColor: theme === 'dark' ? '#1e1e1e' : '#e0e0e0',
+      paddingVertical: 8,
+      paddingHorizontal: 15,
+      borderRadius: 8,
+      marginHorizontal: 5,
+    },
+    qualityButtonActive: {
+      backgroundColor: '#ff2d55',
+    },
+    chatContainer: {
+      flex: 1,
+      backgroundColor: theme === 'dark' ? '#1e1e1e' : '#ffffff',
+      borderRadius: 12,
+      padding: 10,
+      marginBottom: 15,
+      borderWidth: 1,
+      borderColor: theme === 'dark' ? '#333' : '#ccc',
+    },
+    chatList: {
+      flex: 1,
+    },
+    chatMessage: {
+      flexDirection: 'row',
+      marginVertical: 5,
+    },
+    chatSender: {
+      color: '#ff2d55',
+      fontWeight: '600',
+      fontSize: 14,
+    },
+    chatText: {
+      color: theme === 'dark' ? '#fff' : '#000',
+      fontSize: 14,
+      flex: 1,
+    },
+    chatInputContainer: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      marginTop: 10,
+    },
+    chatInput: {
+      flex: 1,
+      backgroundColor: theme === 'dark' ? '#2c2c2c' : '#f0f0f0',
+      color: theme === 'dark' ? '#fff' : '#000',
+      borderRadius: 12,
+      padding: 10,
+      fontSize: 14,
+    },
+    sendButton: {
+      padding: 10,
+    },
+    viewerListContainer: {
+      backgroundColor: theme === 'dark' ? '#1e1e1e' : '#ffffff',
+      borderRadius: 12,
+      padding: 10,
+      marginBottom: 15,
+      borderWidth: 1,
+      borderColor: theme === 'dark' ? '#333' : '#ccc',
+    },
+    sectionTitle: {
+      color: theme === 'dark' ? '#fff' : '#000',
+      fontSize: 16,
+      fontWeight: '600',
+      marginBottom: 10,
+    },
+    viewerList: {
+      maxHeight: 100,
+    },
+    viewerItem: {
+      paddingVertical: 5,
+    },
+    viewerText: {
+      color: theme === 'dark' ? '#fff' : '#000',
+      fontSize: 14,
+    },
+    streamsContainer: {
+      backgroundColor: theme === 'dark' ? '#1e1e1e' : '#ffffff',
+      borderRadius: 12,
+      padding: 10,
+      marginBottom: 15,
+      borderWidth: 1,
+      borderColor: theme === 'dark' ? '#333' : '#ccc',
+    },
+    streamsList: {
+      maxHeight: 100,
+    },
+    streamItem: {
+      width: 120,
+      marginRight: 10,
+      alignItems: 'center',
+    },
+    streamVideo: {
+      width: 100,
+      height: 60,
+      borderRadius: 8,
+    },
+    streamerId: {
+      color: theme === 'dark' ? '#fff' : '#000',
+      fontSize: 12,
+      marginTop: 5,
+    },
+    reactionContainer: {
+      flexDirection: 'row',
+      justifyContent: 'center',
+      marginBottom: 15,
+    },
+    reactionButton: {
+      backgroundColor: theme === 'dark' ? '#1e1e1e' : '#e0e0e0',
+      padding: 12,
+      borderRadius: 12,
+      marginHorizontal: 10,
+    },
+    reactionText: {
+      fontSize: 24,
+    },
+    reaction: {
+      position: 'absolute',
+      right: 20,
+      bottom: 20,
+      fontSize: 30,
+      color: theme === 'dark' ? '#fff' : '#000',
+    },
+    leaveButton: {
+      backgroundColor: '#ff6b6b',
+      paddingVertical: 15,
+      borderRadius: 12,
+      alignItems: 'center',
+      margin: 15,
+    },
+  });
 
-export default App;
+const AppWrapper = () => (
+  <ThemeProvider>
+    <App />
+  </ThemeProvider>
+);
+
+export default AppWrapper;
