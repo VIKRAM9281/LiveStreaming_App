@@ -63,7 +63,7 @@ const App = () => {
   const [error, setError] = useState('');
   const [viewers, setViewers] = useState([]);
   const [localStream, setLocalStream] = useState(null);
-  const [remoteStreams, setRemoteStreams] = useState([]); // Updated to handle multiple streams
+  const [remoteStreams, setRemoteStreams] = useState([]);
   const [isMuted, setIsMuted] = useState(false);
   const [isFrontCamera, setIsFrontCamera] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -75,7 +75,7 @@ const App = () => {
   const [streamQuality, setStreamQuality] = useState('720p');
   const [viewerList, setViewerList] = useState([]);
   const [streamStats, setStreamStats] = useState({ duration: 0, peakViewers: 0 });
-  const [approvedStreamers, setApprovedStreamers] = useState([]); // Track approved streamers
+  const [approvedStreamers, setApprovedStreamers] = useState([]);
 
   const peerConnectionRef = useRef(null);
   const localStreamRef = useRef(null);
@@ -106,13 +106,14 @@ const App = () => {
       setLoading(false);
     });
 
-    socket.on('room-joined', ({ roomId, hostId, isHostStreaming, viewerCount, viewerList }) => {
+    socket.on('room-joined', ({ roomId, hostId, isHostStreaming, viewerCount, viewerList, messages }) => {
       setJoined(true);
       setIsHost(false);
       setHostId(hostId);
       setViewerCount(viewerCount);
       setViewerList(viewerList);
       setIsStreaming(isHostStreaming);
+      setChatMessages(messages.map((msg, idx) => ({ ...msg, id: idx })));
       setLoading(false);
     });
 
@@ -182,16 +183,23 @@ const App = () => {
       }
     });
 
-    socket.on('host-started-streaming', () => setIsStreaming(true));
+    socket.on('host-started-streaming', () => {
+      setIsStreaming(true);
+    });
+
+    socket.on('host-stopped-streaming', () => {
+      setIsStreaming(false);
+      setRemoteStreams(prev => prev.filter(s => s.id !== hostId));
+    });
 
     socket.on('user-started-streaming', ({ streamerId }) => {
-      setApprovedStreamers(prev => [...prev, streamerId]);
+      setApprovedStreamers(prev => [...new Set([...prev, streamerId])]);
     });
 
     socket.on('ice-candidate', ({ candidate, sender }) => {
       const pc = peerConnections.current[sender] || peerConnectionRef.current;
       if (pc && candidate) {
-        pc.addIceCandidate(new RTCIceCandidate(candidate));
+        pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(err => console.error('ICE error:', err));
       }
     });
 
@@ -211,30 +219,36 @@ const App = () => {
           socket.emit('ice-candidate', { target: sender, candidate: event.candidate });
         }
       };
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
-      const answer = await peerConnection.createAnswer();
-      await peerConnection.setLocalDescription(answer);
-      socket.emit('answer', { target: sender, sdp: answer });
-      peerConnections.current[sender] = peerConnection;
+      try {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        socket.emit('answer', { target: sender, sdp: answer });
+        peerConnections.current[sender] = peerConnection;
+      } catch (err) {
+        console.error('Offer handling error:', err);
+      }
     });
 
     socket.on('answer', async ({ sdp, sender }) => {
       const pc = peerConnections.current[sender];
       if (pc) {
-        await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+        } catch (err) {
+          console.error('Answer handling error:', err);
+        }
       }
     });
 
     socket.on('host-left', () => {
-      setError('Host has left the room.');
-      setJoined(false);
-      setIsStreaming(false);
+      setError('Host has left the room. Meeting ended.');
+      leaveRoom();
     });
 
     socket.on('room-closed', () => {
       setError('Room has been closed.');
-      setJoined(false);
-      setIsStreaming(false);
+      leaveRoom();
     });
 
     socket.on('stream-request', ({ viewerId }) => {
@@ -298,7 +312,7 @@ const App = () => {
       socket.removeAllListeners();
       clearInterval(statsInterval);
     };
-  }, [isStreaming]);
+  }, []);
 
   const createRoom = () => {
     if (roomId.trim() === '') return setError('Please enter a room ID.');
@@ -334,7 +348,7 @@ const App = () => {
 
       peerConnectionRef.current.onicecandidate = (event) => {
         if (event.candidate) {
-          console.log('ICE candidate:', event.candidate);
+          socket.emit('ice-candidate', { target: hostId, candidate: event.candidate });
         }
       };
 
@@ -347,6 +361,7 @@ const App = () => {
     } catch (err) {
       console.error('Streaming error:', err);
       setError('Failed to start streaming.');
+      setHasRequestedStream(false);
     }
   };
 
@@ -366,19 +381,18 @@ const App = () => {
   const leaveRoom = () => {
     socket.emit('leave-room');
     setJoined(false);
+    setIsHost(false);
     setIsStreaming(false);
     setViewers([]);
     setViewerList([]);
     setApprovedStreamers([]);
     setRemoteStreams([]);
     setRoomId('');
+    setHostId('');
     setHasRequestedStream(false);
     setChatMessages([]);
     setReactions([]);
     setStreamStats({ duration: 0, peakViewers: 0 });
-    setTimeout(() => {
-      setError('');
-    }, 4000);
 
     localStream?.getTracks().forEach(track => track.stop());
     remoteStreams.forEach(s => s.stream.getTracks().forEach(track => track.stop()));
@@ -493,24 +507,17 @@ const App = () => {
                 objectFit="cover"
                 mirror={isFrontCamera}
               />
-            ) : remoteStreams.length > 0 ? (
+            ) : remoteStreams.find(s => s.id === hostId) ? (
               <RTCView
-                streamURL={remoteStreams.find(s => s.id === hostId)?.stream.toURL() || ''}
+                streamURL={remoteStreams.find(s => s.id === hostId).stream.toURL()}
                 style={styles(theme).video}
                 objectFit="cover"
                 mirror={true}
               />
-            ) : !isHost && localStream ? (
-              <RTCView
-                streamURL={localStream.toURL()}
-                style={styles(theme).video}
-                objectFit="cover"
-                mirror={isFrontCamera}
-              />
             ) : (
               <View style={styles(theme).videoPlaceholder}>
                 <Text style={styles(theme).placeholderText}>
-                  {isStreaming ? 'Waiting for stream...' : 'No stream active'}
+                  {isStreaming ? 'Waiting for host stream...' : 'No stream active'}
                 </Text>
               </View>
             )}
@@ -571,17 +578,15 @@ const App = () => {
               </View>
             ) : (
               <View style={styles(theme).viewerControls}>
-                {!isStreaming && (
-                  <TouchableOpacity
-                    style={[styles(theme).actionButton, hasRequestedStream && styles(theme).disabledButton]}
-                    onPress={requestStreamPermission}
-                    disabled={hasRequestedStream}
-                  >
-                    <Text style={styles(theme).buttonText}>
-                      {hasRequestedStream ? 'Awaiting Permission...' : 'Request to Stream'}
-                    </Text>
-                  </TouchableOpacity>
-                )}
+                <TouchableOpacity
+                  style={[styles(theme).actionButton, hasRequestedStream && styles(theme).disabledButton]}
+                  onPress={requestStreamPermission}
+                  disabled={hasRequestedStream}
+                >
+                  <Text style={styles(theme).buttonText}>
+                    {hasRequestedStream ? 'Awaiting Permission...' : 'Request to Stream'}
+                  </Text>
+                </TouchableOpacity>
                 {localStream && (
                   <View style={styles(theme).controlRow}>
                     <TouchableOpacity style={styles(theme).controlButton} onPress={toggleMute}>
@@ -599,7 +604,7 @@ const App = () => {
                     </TouchableOpacity>
                   </View>
                 )}
-                {isStreaming && (
+                {isStreaming && localStream && (
                   <View style={styles(theme).qualitySelector}>
                     <Text style={styles(theme).qualityLabel}>Quality:</Text>
                     {['720p', '480p'].map(quality => (
@@ -650,9 +655,9 @@ const App = () => {
 
             {approvedStreamers.length > 0 && (
               <View style={styles(theme).streamsContainer}>
-                <Text style={styles(theme).sectionTitle}>Active Streams</Text>
+                <Text style={styles(theme).sectionTitle}>Users' Stream Video</Text>
                 <FlatList
-                  data={remoteStreams}
+                  data={remoteStreams.filter(s => s.id !== hostId)}
                   renderItem={renderStream}
                   keyExtractor={item => item.id}
                   horizontal
@@ -813,7 +818,7 @@ const styles = (theme) =>
       marginVertical: 10,
     },
     controlButton: {
-      backgroundColor: theme === 'dark' ? '#1e1e1e' : '#e0eec0',
+      backgroundColor: theme === 'dark' ? '#1e1e1e' : '#e0e0e0',
       padding: 12,
       borderRadius: 12,
       marginHorizontal: 10,
