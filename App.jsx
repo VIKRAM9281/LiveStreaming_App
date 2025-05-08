@@ -8,10 +8,10 @@ import {
   PermissionsAndroid,
   Platform,
   StyleSheet,
+  TouchableOpacity,
 } from 'react-native';
 import { ActivityIndicator } from 'react-native';
 import { RTCView, mediaDevices, RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } from 'react-native-webrtc';
-import { ErrorUtils } from 'react-native';
 import io from 'socket.io-client';
 
 const socket = io('https://streamingbackend-eh65.onrender.com', {
@@ -81,20 +81,21 @@ const App = () => {
       setLoading(false);
     });
 
-socket.on('room-full', () => {
-  setError('Room is full. Cannot join.');
-  setLoading(false);
-});
+    socket.on('room-full', () => {
+      setError('Room is full. Cannot join.');
+      setLoading(false);
+    });
 
-socket.on('invalid-room', () => {
-  setError('Invalid room ID.');
-  setLoading(false);
-});
+    socket.on('invalid-room', () => {
+      setError('Invalid room ID.');
+      setLoading(false);
+    });
 
-socket.on('room-exists', () => {
-  setError('Room already exists.');
-  setLoading(false);
-});
+    socket.on('room-exists', () => {
+      setError('Room already exists.');
+      setLoading(false);
+    });
+
     socket.on('room-info', ({ viewerCount }) => setViewerCount(viewerCount));
 
     socket.on('user-joined', (viewerId) => {
@@ -189,13 +190,13 @@ socket.on('room-exists', () => {
 
   const createRoom = () => {
     if (roomId.trim() === '') return setError('Please enter a room ID.');
-     setLoading(true);
+    setLoading(true);
     socket.emit('create-room', roomId);
   };
 
   const joinRoom = () => {
     if (roomId.trim() === '') return setError('Please enter a room ID.');
-     setLoading(true);
+    setLoading(true);
     socket.emit('join-room', roomId);
   };
 
@@ -223,6 +224,25 @@ socket.on('room-exists', () => {
       setError('Failed to start streaming.');
     }
   };
+  const stopStreaming = () => {
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+    }
+    if (localStream) {
+      localStream.getTracks().forEach(track => track.stop());
+      setLocalStream(null);
+    }
+    setIsStreaming(false);
+    socket.emit('stop-streaming', roomId); // Notify the server to stop the streaming
+  };
+  const toggleStreaming = () => {
+    if (isStreaming) {
+      stopStreaming();
+    } else {
+      startStreaming();
+    }
+  };
 
   const leaveRoom = () => {
     socket.emit('leave-room');
@@ -230,9 +250,9 @@ socket.on('room-exists', () => {
     setIsStreaming(false);
     setViewers([]);
     setRoomId('');
-    setTimeout(()=>{
-        setError("")
-    },4000)
+    setTimeout(() => {
+      setError("");
+    }, 4000);
 
     localStream?.getTracks().forEach(track => track.stop());
     remoteStream?.getTracks().forEach(track => track.stop());
@@ -267,47 +287,57 @@ socket.on('room-exists', () => {
       <Text style={styles.title}>🎥 Live Streaming App</Text>
 
       {!joined ? (
-        <View>
+        <View style={styles.formContainer}>
           <TextInput
             placeholder="Enter Room ID"
             value={roomId}
             onChangeText={setRoomId}
             style={styles.input}
           />
-        {loading ? (
-         <ActivityIndicator size="large" color="#0000ff" style={{ marginTop: 20 }} />
-        ) : (
-          <>
-            <Button title="Create Room" onPress={createRoom} />
-            <Button title="Join Room" onPress={joinRoom} color="green" />
-          </>
-        )}
+          {loading ? (
+            <ActivityIndicator size="large" color="#0000ff" style={styles.loader} />
+          ) : (
+            <>
+              <TouchableOpacity style={styles.button} onPress={createRoom}>
+                <Text style={styles.buttonText}>Create Room</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.button} onPress={joinRoom}>
+                <Text style={styles.buttonText}>Join Room</Text>
+              </TouchableOpacity>
+            </>
+          )}
           {error ? <Text style={styles.error}>{error}</Text> : null}
         </View>
       ) : (
         <View style={styles.roomInfo}>
-          <Text>Room ID: {roomId}</Text>
-          <Text>You are the {isHost ? 'Host' : 'Viewer'}</Text>
-          <Text>👁️ Viewers: {viewerCount}</Text>
+          <Text style={styles.roomText}>Room ID: {roomId}</Text>
+          <Text style={styles.roomText}>You are the {isHost ? 'Host' : 'Viewer'}</Text>
+          <Text style={styles.roomText}>👁️ Viewers: {viewerCount}</Text>
 
           {isHost && (
             <View style={styles.streamBox}>
               {localStream && (
                 <RTCView
                   streamURL={localStream.toURL()}
-                  style={styles.video}
+                  style={styles.fullScreenVideo}
                   objectFit="cover"
                   mirror={isFrontCamera}
                 />
               )}
               <View style={styles.controls}>
-                <Button title={isMuted ? "Unmute" : "Mute"} onPress={toggleMute} />
-                <Button title="Switch Camera" onPress={switchCamera} />
+                <TouchableOpacity style={styles.controlButton} onPress={toggleMute}>
+                  <Text style={styles.buttonText}>{isMuted ? "Unmute" : "Mute"}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.controlButton} onPress={switchCamera}>
+                  <Text style={styles.buttonText}>Switch Camera</Text>
+                </TouchableOpacity>
               </View>
               {!isStreaming ? (
-                <Button title="Start Streaming" onPress={startStreaming} />
+                <TouchableOpacity style={styles.startStreamingButton} onPress={startStreaming}>
+                  <Text style={styles.buttonText}>Start Streaming</Text>
+                </TouchableOpacity>
               ) : (
-                <Text style={{ color: 'green' }}>🔴 Streaming Live</Text>
+                <Text style={styles.streamingText}>🔴 Streaming Live</Text>
               )}
             </View>
           )}
@@ -316,16 +346,18 @@ socket.on('room-exists', () => {
             <View style={styles.streamBox}>
               <RTCView
                 streamURL={remoteStream.toURL()}
-                style={styles.video}
+                style={styles.fullScreenVideo}
                 objectFit="cover"
                 mirror={true}
               />
-              <Text>📡 Watching stream...</Text>
-              <Text>👁️ Viewers: {viewerCount}</Text>
+              <Text style={styles.viewingText}>📡 Watching stream...</Text>
+              <Text style={styles.roomText}>👁️ Viewers: {viewerCount}</Text>
             </View>
           )}
 
-          <Button title="Leave Room" onPress={leaveRoom} color="red" />
+          <TouchableOpacity style={styles.leaveButton} onPress={leaveRoom}>
+            <Text style={styles.buttonText}>Leave Room</Text>
+          </TouchableOpacity>
         </View>
       )}
     </ScrollView>
@@ -334,46 +366,113 @@ socket.on('room-exists', () => {
 
 const styles = StyleSheet.create({
   container: {
-    padding: 16,
-    paddingBottom: 50,
-    backgroundColor: '#f2f2f2',
+    padding: 20,
+    backgroundColor: '#f8f8f8',
+    flex: 1,
   },
   title: {
-    fontSize: 26,
+    fontSize: 28,
     fontWeight: 'bold',
-    marginBottom: 16,
+    color: '#1a73e8',
+    marginBottom: 20,
     textAlign: 'center',
+  },
+  formContainer: {
+    marginTop: 50,
+    alignItems: 'center',
   },
   input: {
     borderWidth: 1,
     borderColor: '#ccc',
     borderRadius: 8,
-    padding: 10,
+    padding: 12,
+    width: '80%',
     marginVertical: 10,
     backgroundColor: '#fff',
+    fontSize: 16,
+  },
+  button: {
+    backgroundColor: '#1a73e8',
+    paddingVertical: 12,
+    paddingHorizontal: 30,
+    borderRadius: 8,
+    marginVertical: 10,
+    width: '80%',
+    alignItems: 'center',
+  },
+  buttonText: {
+    color: '#fff',
+    fontSize: 16,
+  },
+  loader: {
+    marginVertical: 20,
   },
   error: {
     color: 'red',
-    marginTop: 10,
+    marginTop: 20,
+    fontSize: 14,
   },
   roomInfo: {
-    marginTop: 20,
-  },
-  streamBox: {
-    marginVertical: 20,
+    marginTop: 30,
     alignItems: 'center',
   },
-  video: {
+  roomText: {
+    fontSize: 18,
+    marginVertical: 5,
+  },
+  streamBox: {
     width: '100%',
-    height: 300,
+    position: 'relative',
+  },
+  fullScreenVideo: {
+    width: '100%',
+    height: 350,
     backgroundColor: '#000',
-    borderRadius: 10,
+    borderRadius: 12,
+    marginBottom: 15,
   },
   controls: {
     flexDirection: 'row',
     justifyContent: 'space-around',
-    marginVertical: 10,
     width: '100%',
+    marginVertical: 10,
+  },
+  controlButton: {
+    backgroundColor: '#1a73e8',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+  },
+  startStreamingButton: {
+    marginLeft:38,
+    backgroundColor: '#34a853',
+    paddingVertical: 12,
+    paddingHorizontal: 30,
+    borderRadius: 8,
+    width: '80%',
+    alignItems: 'center',
+  },
+  streamingText: {
+    fontSize: 16,
+    color: 'green',
+    fontWeight: 'bold',
+    textAlign: 'center',
+    marginTop: 20,
+  },
+  viewingText: {
+    fontSize: 18,
+    color: '#555',
+    marginTop: 10,
+    textAlign: 'center',
+  },
+  leaveButton: {
+    backgroundColor: '#ea4335',
+    paddingVertical: 12,
+    paddingHorizontal: 30,
+    borderRadius: 8,
+    marginTop: 20,
+    width: '80%',
+    alignItems: 'center',
   },
 });
 
