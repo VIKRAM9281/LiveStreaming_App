@@ -76,11 +76,11 @@ const App = () => {
     });
 
     socket.on('room-joined', ({ roomId, hostId, isHostStreaming, viewerCount }) => {
+      setIsStreaming(true);
       setJoined(true);
       setIsHost(false);
       setHostId(hostId);
       setViewerCount(viewerCount);
-      setIsStreaming(true);
       setLoading(false);
     });
 
@@ -101,7 +101,7 @@ const App = () => {
 
     socket.on('room-info', ({ viewerCount }) => setViewerCount(viewerCount));
 
-    socket.on('user-joined', (viewerId) => {
+    socket.on('user-joined',async (viewerId) => {
       if (!localStreamRef.current || localStreamRef.current.getTracks().length === 0) {
         console.warn('Viewer joined but local stream not ready');
         return;
@@ -118,10 +118,7 @@ const App = () => {
           socket.emit('ice-candidate', { target: viewerId, candidate: event.candidate });
         }
       };
-
       peerConnections.current[viewerId] = peerConnection;
-
-      setTimeout(async () => {
         try {
           const offer = await peerConnection.createOffer({
             offerToReceiveAudio: false,
@@ -132,7 +129,6 @@ const App = () => {
         } catch (err) {
           console.error('Offer error:', err);
         }
-      }, 500);
     });
 
     socket.on('user-left', (viewerId) => {
@@ -162,6 +158,7 @@ const App = () => {
           socket.emit('ice-candidate', { target: sender, candidate: event.candidate });
         }
       };
+          console.log(localStream)
       await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
@@ -325,7 +322,11 @@ const App = () => {
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>🎥 Live Streaming App</Text>
-
+      <View style={styles.mainBox}>
+      {joined ?<Text style={styles.roomText}>👁️ Viewers: {viewerCount}</Text>:null}
+      {joined ?<Text style={styles.roomText}>Room ID: {roomId}</Text>:null}
+      {joined ?<Text style={styles.roomText}>You are the {isHost ? 'Host' : 'Viewer'}</Text>:null}
+      </View>
       {!joined ? (
         <View style={styles.formContainer}>
           <TextInput
@@ -350,10 +351,6 @@ const App = () => {
         </View>
       ) : (
         <View style={styles.roomInfo}>
-          <Text style={styles.roomText}>Room ID: {roomId}</Text>
-          <Text style={styles.roomText}>You are the {isHost ? 'Host' : 'Viewer'}</Text>
-          <Text style={styles.roomText}>👁️ Viewers: {viewerCount}</Text>
-
           {isHost && (
             <View style={styles.streamBox}>
               {localStream && (
@@ -420,17 +417,6 @@ const App = () => {
                   </Text>
                 </TouchableOpacity>
               )}
-              {localStream && (
-                <View style={styles.controls}>
-                  <TouchableOpacity style={styles.controlButton} onPress={toggleMute}>
-                    <Text style={styles.buttonText}>{isMuted ? 'Unmute' : 'Mute'}</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.controlButton} onPress={switchCamera}>
-                    <Text style={styles.buttonText}>Switch Camera</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-              {isStreaming && <Text style={styles.roomText}>👁️ Viewers: {viewerCount}</Text>}
             </View>
           )}
 
@@ -446,7 +432,7 @@ const App = () => {
 const styles = StyleSheet.create({
   container: {
     padding: 20,
-    backgroundColor: '#f8f8f8',
+    backgroundColor: 'black',
     flex: 1,
   },
   title: {
@@ -498,14 +484,21 @@ const styles = StyleSheet.create({
   roomText: {
     fontSize: 18,
     marginVertical: 5,
+    color:'white',
   },
+  mainBox:{
+   position: 'absolute',
+   top:10,
+   flex:1,
+
+   },
   streamBox: {
     width: '100%',
     position: 'relative',
   },
   fullScreenVideo: {
     width: '100%',
-    height: 350,
+    height: 700,
     backgroundColor: '#000',
     borderRadius: 12,
     marginBottom: 15,
