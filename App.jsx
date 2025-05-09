@@ -15,7 +15,7 @@ import { ActivityIndicator } from 'react-native';
 import { RTCView, mediaDevices, RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } from 'react-native-webrtc';
 import io from 'socket.io-client';
 
-const socket = io('https://streamingbackend-eh65.onrender.com', {
+const socket = io('https://streamalong.live', {
   reconnection: true,
   reconnectionAttempts: Infinity,
   reconnectionDelay: 1000,
@@ -323,7 +323,7 @@ const App = () => {
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>🎥 Live Streaming App</Text>
       <View style={styles.mainBox}>
-      {joined ?<Text style={styles.roomText}>👁️ Viewers: {viewerCount}</Text>:null}
+      {joined ?<Text style={styles.roomText}>👁️ {viewerCount}</Text>:null}
       {joined ?<Text style={styles.roomText}>Room ID: {roomId}</Text>:null}
       {joined ?<Text style={styles.roomText}>You are the {isHost ? 'Host' : 'Viewer'}</Text>:null}
       </View>
@@ -361,14 +361,14 @@ const App = () => {
                   mirror={isFrontCamera}
                 />
               )}
-              <View style={styles.controls}>
-                <TouchableOpacity style={styles.controlButton} onPress={toggleMute}>
-                  <Text style={styles.buttonText}>{isMuted ? 'Unmute' : 'Mute'}</Text>
+              {isStreaming?<View style={styles.controls}>
+               <TouchableOpacity style={styles.controlButton} onPress={toggleMute}>
+               <Text style={styles.buttonText}>{isMuted ? 'Unmute' : 'Mute'}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.controlButton} onPress={switchCamera}>
-                  <Text style={styles.buttonText}>Switch Camera</Text>
+                <Text style={styles.buttonText}>Switch Camera</Text>
                 </TouchableOpacity>
-              </View>
+                </View>:null}
               <View style={styles.streamControls}>
                 {!isStreaming ? (
                   <TouchableOpacity style={styles.startStreamingButton} onPress={startStreaming}>
@@ -467,7 +467,7 @@ const styles = StyleSheet.create({
   },
   buttonText: {
     color: '#fff',
-    fontSize: 16,
+    fontSize: 12,
   },
   loader: {
     marginVertical: 20,
@@ -488,9 +488,13 @@ const styles = StyleSheet.create({
   },
   mainBox:{
    position: 'absolute',
-   top:10,
+   width:'100%',
+   top:60,
    flex:1,
-
+   display: 'flex',
+   flexDirection: 'row',  // Ensure children are laid out horizontally
+   justifyContent: 'space-between',  // Distribute children with space between them
+   alignItems: 'center',
    },
   streamBox: {
     width: '100%',
@@ -498,7 +502,7 @@ const styles = StyleSheet.create({
   },
   fullScreenVideo: {
     width: '100%',
-    height: 700,
+    height: 600,
     backgroundColor: '#000',
     borderRadius: 12,
     marginBottom: 15,
