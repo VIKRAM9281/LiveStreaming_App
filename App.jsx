@@ -3,15 +3,14 @@ import {
   View,
   Text,
   TextInput,
-  Button,
+  TouchableOpacity,
   ScrollView,
   PermissionsAndroid,
   Platform,
   StyleSheet,
-  TouchableOpacity,
+  ActivityIndicator,
   Alert,
 } from 'react-native';
-import { ActivityIndicator } from 'react-native';
 import { RTCView, mediaDevices, RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } from 'react-native-webrtc';
 import io from 'socket.io-client';
 
@@ -31,7 +30,123 @@ const iceServers = {
   ],
 };
 
-const App = () => {
+// Login Form Component
+const LoginForm = ({ onLogin, onToggleForm, setError }) => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+
+  const handleLogin = () => {
+    if (email === 'vikram' && password === 'Test@123') {
+      onLogin();
+    } else {
+      setError('Invalid email or password');
+    }
+  };
+
+  return (
+    <View style={styles.formContainer}>
+      <Text style={styles.formTitle}>Login</Text>
+      <TextInput
+        placeholder="Email"
+        value={email}
+        onChangeText={setEmail}
+        style={styles.input}
+        keyboardType="email-address"
+        autoCapitalize="none"
+      />
+      <TextInput
+        placeholder="Password"
+        value={password}
+        onChangeText={setPassword}
+        style={styles.input}
+        secureTextEntry
+      />
+      <TouchableOpacity style={styles.button} onPress={handleLogin}>
+        <Text style={styles.buttonText}>Login</Text>
+      </TouchableOpacity>
+      <TouchableOpacity onPress={onToggleForm}>
+        <Text style={styles.toggleText}>Don't have an account? Register</Text>
+      </TouchableOpacity>
+    </View>
+  );
+};
+
+// Register Form Component
+const RegisterForm = ({ onRegister, onToggleForm, setError }) => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+
+  const handleRegister = () => {
+    if (password !== confirmPassword) {
+      setError('Passwords do not match');
+      return;
+    }
+    // Dummy registration (replace with real backend logic)
+    if (email && password) {
+      onRegister();
+    } else {
+      setError('Please fill all fields');
+    }
+  };
+
+  return (
+    <View style={styles.formContainer}>
+      <Text style={styles.formTitle}>Register</Text>
+      <TextInput
+        placeholder="Email"
+        value={email}
+        onChangeText={setEmail}
+        style={styles.input}
+        keyboardType="email-address"
+        autoCapitalize="none"
+      />
+      <TextInput
+        placeholder="Password"
+        value={password}
+        onChangeText={setPassword}
+        style={styles.input}
+        secureTextEntry
+      />
+      <TextInput
+        placeholder="Confirm Password"
+        value={confirmPassword}
+        onChangeText={setConfirmPassword}
+        style={styles.input}
+        secureTextEntry
+      />
+      <TouchableOpacity style={styles.button} onPress={handleRegister}>
+        <Text style={styles.buttonText}>Register</Text>
+      </TouchableOpacity>
+      <TouchableOpacity onPress={onToggleForm}>
+        <Text style={styles.toggleText}>Already have an account? Login</Text>
+      </TouchableOpacity>
+    </View>
+  );
+};
+
+// Auth Screen Component
+const AuthScreen = ({ onLogin }) => {
+  const [showLogin, setShowLogin] = useState(true);
+  const [error, setError] = useState('');
+
+  const toggleForm = () => setShowLogin(!showLogin);
+
+  return (
+    <View style={styles.authContainer}>
+      <Text style={styles.title}>🎥 Live Streaming App</Text>
+      {showLogin ? (
+        <LoginForm onLogin={onLogin} onToggleForm={toggleForm} setError={setError} />
+      ) : (
+        <RegisterForm onRegister={onLogin} onToggleForm={toggleForm} setError={setError} />
+      )}
+      {error ? <Text style={styles.error}>{error}</Text> : null}
+    </View>
+  );
+};
+
+// Main Screen Component
+const MainScreen = () => {
   const [roomId, setRoomId] = useState('');
   const [joined, setJoined] = useState(false);
   const [isHost, setIsHost] = useState(false);
@@ -101,7 +216,7 @@ const App = () => {
 
     socket.on('room-info', ({ viewerCount }) => setViewerCount(viewerCount));
 
-    socket.on('user-joined',async (viewerId) => {
+    socket.on('user-joined', async (viewerId) => {
       if (!localStreamRef.current || localStreamRef.current.getTracks().length === 0) {
         console.warn('Viewer joined but local stream not ready');
         return;
@@ -119,16 +234,16 @@ const App = () => {
         }
       };
       peerConnections.current[viewerId] = peerConnection;
-        try {
-          const offer = await peerConnection.createOffer({
-            offerToReceiveAudio: false,
-            offerToReceiveVideo: false,
-          });
-          await peerConnection.setLocalDescription(offer);
-          socket.emit('offer', { target: viewerId, sdp: offer });
-        } catch (err) {
-          console.error('Offer error:', err);
-        }
+      try {
+        const offer = await peerConnection.createOffer({
+          offerToReceiveAudio: false,
+          offerToReceiveVideo: false,
+        });
+        await peerConnection.setLocalDescription(offer);
+        socket.emit('offer', { target: viewerId, sdp: offer });
+      } catch (err) {
+        console.error('Offer error:', err);
+      }
     });
 
     socket.on('user-left', (viewerId) => {
@@ -158,7 +273,6 @@ const App = () => {
           socket.emit('ice-candidate', { target: sender, candidate: event.candidate });
         }
       };
-          console.log(localStream)
       await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
@@ -323,9 +437,9 @@ const App = () => {
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>🎥 Live Streaming App</Text>
       <View style={styles.mainBox}>
-      {joined ?<Text style={styles.roomText}>👁️ {viewerCount}</Text>:null}
-      {joined ?<Text style={styles.roomText}>Room ID: {roomId}</Text>:null}
-      {joined ?<Text style={styles.roomText}>You are the {isHost ? 'Host' : 'Viewer'}</Text>:null}
+        {joined ? <Text style={styles.roomText}>👁️ {viewerCount}</Text> : null}
+        {joined ? <Text style={styles.roomText}>Room ID: {roomId}</Text> : null}
+        {joined ? <Text style={styles.roomText}>You are the {isHost ? 'Host' : 'Viewer'}</Text> : null}
       </View>
       {!joined ? (
         <View style={styles.formContainer}>
@@ -336,7 +450,7 @@ const App = () => {
             style={styles.input}
           />
           {loading ? (
-            <ActivityIndicator size="large" color="#0000ff" style={styles.loader} />
+            <ActivityIndicator size="large" color="#1a73e8" style={styles.loader} />
           ) : (
             <>
               <TouchableOpacity style={styles.button} onPress={createRoom}>
@@ -361,14 +475,16 @@ const App = () => {
                   mirror={isFrontCamera}
                 />
               )}
-              {isStreaming?<View style={styles.controls}>
-               <TouchableOpacity style={styles.controlButton} onPress={toggleMute}>
-               <Text style={styles.buttonText}>{isMuted ? 'Unmute' : 'Mute'}</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.controlButton} onPress={switchCamera}>
-                <Text style={styles.buttonText}>Switch Camera</Text>
-                </TouchableOpacity>
-                </View>:null}
+              {isStreaming ? (
+                <View style={styles.controls}>
+                  <TouchableOpacity style={styles.controlButton} onPress={toggleMute}>
+                    <Text style={styles.buttonText}>{isMuted ? 'Unmute' : 'Mute'}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.controlButton} onPress={switchCamera}>
+                    <Text style={styles.buttonText}>Switch Camera</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
               <View style={styles.streamControls}>
                 {!isStreaming ? (
                   <TouchableOpacity style={styles.startStreamingButton} onPress={startStreaming}>
@@ -429,11 +545,28 @@ const App = () => {
   );
 };
 
+// Main App Component
+const App = () => {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+
+  const handleLogin = () => {
+    setIsAuthenticated(true);
+  };
+
+  return isAuthenticated ? <MainScreen /> : <AuthScreen onLogin={handleLogin} />;
+};
+
 const styles = StyleSheet.create({
   container: {
     padding: 20,
-    backgroundColor: 'black',
+    backgroundColor: '#f0f4f8',
+    flexGrow: 1,
+  },
+  authContainer: {
     flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
   },
   title: {
     fontSize: 28,
@@ -443,15 +576,29 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   formContainer: {
-    marginTop: 50,
+    width: '100%',
     alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  formTitle: {
+    fontSize: 24,
+    fontWeight: '600',
+    color: '#333',
+    marginBottom: 20,
   },
   input: {
     borderWidth: 1,
-    borderColor: '#ccc',
+    borderColor: '#ddd',
     borderRadius: 8,
     padding: 12,
-    width: '80%',
+    width: '100%',
     marginVertical: 10,
     backgroundColor: '#fff',
     fontSize: 16,
@@ -462,20 +609,27 @@ const styles = StyleSheet.create({
     paddingHorizontal: 30,
     borderRadius: 8,
     marginVertical: 10,
-    width: '80%',
+    width: '100%',
     alignItems: 'center',
   },
   buttonText: {
     color: '#fff',
-    fontSize: 12,
+    fontSize: 16,
+    fontWeight: '600',
   },
-  loader: {
-    marginVertical: 20,
+  toggleText: {
+    color: '#1a73e8',
+    fontSize: 14,
+    marginTop: 10,
   },
   error: {
     color: 'red',
-    marginTop: 20,
+    marginTop: 10,
     fontSize: 14,
+    textAlign: 'center',
+  },
+  loader: {
+    marginVertical: 20,
   },
   roomInfo: {
     marginTop: 30,
@@ -484,18 +638,16 @@ const styles = StyleSheet.create({
   roomText: {
     fontSize: 18,
     marginVertical: 5,
-    color:'white',
+    color: '#333',
   },
-  mainBox:{
-   position: 'absolute',
-   width:'100%',
-   top:60,
-   flex:1,
-   display: 'flex',
-   flexDirection: 'row',  // Ensure children are laid out horizontally
-   justifyContent: 'space-between',  // Distribute children with space between them
-   alignItems: 'center',
-   },
+  mainBox: {
+    position: 'absolute',
+    width: '100%',
+    top: 60,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
   streamBox: {
     width: '100%',
     position: 'relative',
